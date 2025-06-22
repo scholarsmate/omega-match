@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Example Python binding using ctypes to call omega_matchmatch library.
+Example Python binding using ctypes to call omega_match library.
 This demonstrates how to use the library for language bindings.
 
 Prerequisites:
-    cmake --preset release -Domega_match_BUILD_CLI=OFF
+    cmake --preset release -DOMEGA_MATCH_BUILD_CLI=OFF
     cmake --build --preset release  
     cmake --install cmake-build-release --prefix /usr/local
 """
@@ -39,13 +39,21 @@ def find_omega_match_library():
 def main():
     # Load the library
     lib_path = find_omega_match_library()
-    print(f"Loading library from: {lib_path}")
+    print(f"Loading library using ctypes from: {lib_path}\n")
     omega_match = ctypes.CDLL(lib_path)
     
+    # Print the version
+    try:
+        omega_match.omega_matcher_version.restype = ctypes.c_char_p
+        version = omega_match.omega_matcher_version().decode('utf-8')
+        print(f"⭐ Omega Match Version: {version}\n")
+    except AttributeError:
+        print("Version function 'omega_matcher_version' not found in the library.\n")
+
     # Example: Get version (if such function exists)
     # This is just a demonstration - you'd need to check the actual C API
-    print("✅ Successfully loaded omega_matchmatch library!")
-    print("✅ Ready for pattern matching operations.")
+    print("✅ Successfully loaded omega_match library!")
+    print("✅ Ready for pattern matching operations.\n")
     
     # For actual usage, you'd need to:
     # 1. Define ctypes function signatures matching the C API
@@ -53,11 +61,11 @@ def main():
     # 3. Perform matching operations
     # 4. Handle results
     
-    print("\nTo implement full bindings:")
-    print("1. Review include/omega_match/list_matcher.h for the C API")
-    print("2. Define ctypes function prototypes")
-    print("3. Implement Python wrapper functions")
-    print("4. Handle memory management properly")
+    print("📋 To implement full bindings:")
+    print("   1. Review include/omega_match/list_matcher.h for the C API")
+    print("   2. Define ctypes function prototypes")
+    print("   3. Implement Python wrapper functions")
+    print("   4. Handle memory management properly")
 
 if __name__ == "__main__":
     main()
