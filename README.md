@@ -1,19 +1,19 @@
-# omega_match
+# OmegaMatch
 
 [![CI Build and Test](https://github.com/scholarsmate/omega-match/actions/workflows/cmake-multi-platform.yml/badge.svg)](https://github.com/scholarsmate/omega-match/actions/workflows/cmake-multi-platform.yml)
 [![Release](https://github.com/scholarsmate/omega-match/actions/workflows/release.yml/badge.svg)](https://github.com/scholarsmate/omega-match/actions/workflows/release.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-[![Version](https://img.shields.io/badge/version-0.1.0-green.svg)](https://github.com/scholarsmate/omega_match/releases)
+[![Version](https://img.shields.io/badge/version-0.1.0-green.svg)](https://github.com/scholarsmate/omega-match/releases)
 
-omega_match is a high-performance, multithreaded, multipattern matching library written in C. It combines a Bloom filter, hash table, and optimized "short matcher" to scan large text for multiple patterns in parallel.
+OmegaMatch is a high-performance, multithreaded, multipattern matching library written in C. It combines a Bloom filter, hash table, and optimized "short matcher" to scan large text for multiple patterns in parallel.
 
 ## Features
 
-- Parallel search using OpenMP
+- Parallel matching using [OpenMP](https://www.openmp.org/)
 - Bloom filter pre-filtering
-- Exact match via highly optimized hash table scans
+- Exact match via highly optimized hash table scans and comparisons
 - Specialized short matcher for patterns length 1–4
-- Post-processing filters: no-overlap, longest-only, word-boundary
+- Post-processing filters: no-overlap, longest-only, word-boundary, begin and end of line anchors
 - Optimized radix sort for results: length descending, offset ascending
 - Optional case-insensitive, punctuation ignoring, whitespace eliding via transform table
 - Configurable memory sanitizers and thread/chunk sizes
@@ -27,17 +27,17 @@ This project uses CMake with flexible build options:
 ```sh
 cmake --preset release
 cmake --build --preset release
-ctest --test-dir cmake-build-release --output-on-failure
+ctest --preset release --output-on-failure
 ```
 
 ### Language Bindings Build (libraries only)
 ```sh
 cmake --preset release -DOLM_BUILD_CLI=OFF
 cmake --build --preset release
-cmake --install cmake-build-release --prefix /usr/local
+cmake --install build-gcc-release --prefix /usr/local
 ```
 
-This creates both static and shared libraries without the CLI tool, which is ideal for:
+This creates both static and shared libraries without the CLI tool, ideal for:
 - Python bindings (ctypes, Cython, pybind11)
 - Node.js native modules
 - Go cgo bindings
@@ -92,6 +92,8 @@ After building, installers can be created with CPack. Example:
 
 ```sh
 cpack -G TGZ --config build/CPackConfig.cmake
+cpack -G DEB --config build/CPackConfig.cmake
+cpack -G RPM --config build/CPackConfig.cmake
 # on Windows with WiX installed
 cpack -G WIX --config build/CPackConfig.cmake
 ```
@@ -107,19 +109,39 @@ these builds are uploaded as workflow artifacts for each compiler.
 ### Command-line tool
 
 ```sh
-./olm <compiled_patterns> <input_file> [options]
+./olm <command> <patterns> <input_file> [options]
 ```
 
-**Options:**
+**Commands:**
 
-- `--no-overlap`         Drop overlapping matches
-- `--longest-only`       Keep only the longest match at each offset
-- `--case-insensitive`   Perform case-insensitive matching
-- `--ignore-punctuation` Strip punctuation before matching
-- `--elide-ws`           Collapse whitespace runs to a single space
-- `--word-boundary`      Only match on word boundaries
-- `--threads <n>`        Set OpenMP threads
-- `--chunk <size>`       Set OpenMP chunk size
+-  `compile`    Compile patterns
+-  `match`      Match patterns
+
+**Compile Command Options:**
+
+- `--ignore-case`         Ignore case in patterns
+- `--ignore-punctuation`  Ignore punctuation in patterns
+- `--elide-whitespace`    Remove whitespace in patterns
+- `-v, --verbose`         Enable verbose output
+- `-h, --help`            Show this help message
+
+**Match Command Options:**
+
+- `-o, --output FILE`     Write results to FILE instead of stdout (UTF-8 and LF EOL)
+- `--ignore-case`         Ignore case during matching
+- `--ignore-punctuation`  Ignore punctuation during matching
+- `--elide-whitespace`    Remove whitespace during matching
+- `--longest`             Only return longest matches
+- `--no-overlap`          Avoid overlapping matches
+- `--word-boundary`       Only match at word boundaries
+- `--word-prefix`         Only match at word prefixes
+- `--word-suffix`         Only match at word suffixes
+- `--line-start`          Only match at the start of a line
+- `--line-end`            Only match at the end of a line
+- `--threads N`           Number of threads to use
+- `--chunk-size N`        Chunk size for parallel processing
+- `-v, --verbose`         Enable verbose output
+- `-h, --help`            Show this help message
 
 ### C API
 
@@ -144,7 +166,7 @@ omega_list_matcher_destroy(m);
 
 ## Implementation Details
 
-omega_match uses a two-tier matching pipeline:
+OmegaMatch uses a two-tier matching pipeline:
 
 - **Bloom filter** for fast pre-filtering of candidate positions.
 - **Hash table scan** for exact matches of patterns length ≥ 5.
@@ -154,7 +176,6 @@ omega_match uses a two-tier matching pipeline:
   - Longest-only
   - Word-boundary, prefix, suffix checks
 - **Transform table** (when enabled) for case-insensitive, punctuation ignoring, and whitespace eliding.
-
 - **Compiled pattern store** is serialized into a compact binary format and memory-mapped by each matcher, enabling low startup cost, minimal per-instance memory overhead, and parallel sharing across threads or processes.
 
 ## Compiler Options
@@ -171,26 +192,22 @@ Supported compilers: GCC, Clang, MSVC (via CMake).
 
 ## Performance
 
-- Benchmarks in `perf_test.sh` and Gnuplot script `perf_plot.gp`.
+- Benchmarks in `perf_test.py` and Gnuplot script `perf_plot.gp`.
 - Consider using `-DENABLE_SANITIZERS=OFF` for maximum speed.
 - Adjust `--threads` and `--chunk` options to tune parallel load.
 
 ## CI/CD
 
 Continuous integration runs on GitHub Actions. Every push and pull request
-builds the library, installs the release binaries and executes the full test
-suite on Linux using the installed `olm` executable. When a commit is
+builds the libraries, installs the release binaries and executes the full test
+suite using the installed `olm` executable. When a commit is
 tagged with a semantic version (`vMAJOR.MINOR.PATCH`), additional cross builds
-produce installable packages for Linux x64, Linux ARM64 and Windows x64. The
-resulting artifacts are attached to the GitHub release automatically under
+produce installable packages for Linux x64, Linux ARM64, macOS ARM64 and Windows x64.
+The resulting artifacts are attached to the GitHub release automatically under
 `dist/native/<platform>`.
-
-Cross builds rely on [dockcross](https://github.com/dockcross/dockcross), so
-Docker (or Podman) must be available. When neither is present the
-`build_all.sh` script simply skips the cross-platform steps.
 
 ## License
 
-This project is licensed under the [Apache License 2.0](LICENSE).
+The OmegaMatch project is licensed under the [Apache License 2.0](LICENSE).
 
-It is not an official Apache Software Foundation (ASF) project.
+OmegaMatch is not an official Apache Software Foundation (ASF) project.
