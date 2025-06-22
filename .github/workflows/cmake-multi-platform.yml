@@ -56,6 +56,9 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: Fetch all git tags
+      run: git fetch --tags --force
+
     - name: Install dependencies (Linux)
       if: runner.os == 'Linux'
       run: |
@@ -67,6 +70,16 @@ jobs:
       run: |
         brew install libomp
 
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.13'
+
+    - name: Install Python modules
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install build cffi pytest pytest-cov
+
     - name: Set reusable strings
       id: strings
       shell: bash
@@ -76,13 +89,13 @@ jobs:
     - name: Configure CMake
       run: |
         if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
-          cmake --preset release
+          cmake --preset release -DPython3_EXECUTABLE=$(which python)
         elif [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
-          cmake --preset release
+          cmake --preset release -DPython3_EXECUTABLE=$(which python)
         elif [ "${{ matrix.os }}" = "macos-latest" ]; then
-          cmake --preset macos-release
+          cmake --preset macos-release -DPython3_EXECUTABLE=$(which python)
         else
-          cmake -B build -G "${{ matrix.generator }}" -A x64 -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} ${{ matrix.cmake_args }}
+          cmake -B build -G "${{ matrix.generator }}" -A x64 -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} ${{ matrix.cmake_args }} -DPython3_EXECUTABLE=$(which python)
         fi
       shell: bash
 
@@ -106,6 +119,7 @@ jobs:
           pushd examples && python3 python_binding_demo.py && popd
         elif [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
           ctest --test-dir build-gcc-release --output-on-failure
+          pushd examples && python3 python_binding_demo.py && popd
         elif [ "${{ matrix.os }}" = "macos-latest" ]; then
           ctest --test-dir build-clang-release --output-on-failure
         else
@@ -114,7 +128,7 @@ jobs:
       shell: bash
 
     # Only upload artifacts for successful builds (no packaging needed for CI)
-    - name: Upload CLI Binary and PDBs
+    - name: Upload CLI binaries, libraries and PDBs
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.name }}-binary
@@ -123,3 +137,133 @@ jobs:
           ${{ matrix.os == 'ubuntu-latest' && 'build-gcc-release/libomega_match*' || matrix.os == 'ubuntu-24.04-arm' && 'build-gcc-release/libomega_match*' || matrix.os == 'macos-latest' && 'build-clang-release/libomega_match*' || 'build/Release/omega_match*' }}
           ${{ matrix.os == 'windows-latest' && 'build/Release/*.pdb' || '' }}
         retention-days: 7
+
+    # Upload native library artifacts for universal wheel
+    - name: Upload native library artifact (linux-x64)
+      if: matrix.os == 'ubuntu-latest' && matrix.arch == 'x64'
+      uses: actions/upload-artifact@v4
+      with:
+        name: native-lib-linux-x64
+        path: bindings/python/omega_match/native/lib/libomega_match-linux-x64.so
+        retention-days: 7
+
+    - name: Upload native library artifact (linux-arm64)
+      if: matrix.os == 'ubuntu-24.04-arm' && matrix.arch == 'arm64'
+      uses: actions/upload-artifact@v4
+      with:
+        name: native-lib-linux-arm64
+        path: bindings/python/omega_match/native/lib/libomega_match-linux-arm64.so
+        retention-days: 7
+
+    - name: Upload native library artifact (windows-x64)
+      if: matrix.os == 'windows-latest' && matrix.arch == 'x64'
+      uses: actions/upload-artifact@v4
+      with:
+        name: native-lib-windows-x64
+        path: bindings/python/omega_match/native/lib/libomega_match-windows-x64.dll
+        retention-days: 7
+
+    - name: Upload native library artifact (macos-arm64)
+      if: matrix.os == 'macos-latest' && matrix.arch == 'arm64'
+      uses: actions/upload-artifact@v4
+      with:
+        name: native-lib-macos-arm64
+        path: bindings/python/omega_match/native/lib/libomega_match-macos-arm64.dylib
+        retention-days: 7
+
+    - name: Package
+      run: |
+        if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+          cd build-gcc-release
+        elif [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
+          cd build-gcc-release
+        elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+          cd build-clang-release
+        else
+          cd build/Release
+        fi
+        # Package for each platform
+        if [ "${{ matrix.os }}" = "windows-latest" ]; then
+          cpack -G WIX || true
+        elif [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+          cpack -G DEB || true
+          cpack -G RPM || true
+          cpack -G TGZ || true
+        elif [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
+          cpack -G DEB || true
+          cpack -G RPM || true
+          cpack -G TGZ || true
+        elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+          cpack -G TGZ || true
+        fi
+      shell: bash
+
+    - name: Upload package artifacts
+      run: |
+        set -e
+        if [ "${{ matrix.os }}" = "windows-latest" ]; then
+          for f in *.msi; do
+            if [ -e "$f" ]; then
+              echo "$f" && mv "$f" "windows-x64-installer.msi" && break
+            fi
+          done
+          if [ ! -e windows-x64-installer.msi ]; then echo "ERROR: windows-x64-installer.msi not found!"; exit 1; fi
+        elif [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+          for ext in deb rpm tar.gz; do
+            for f in *.$ext; do
+              if [ -e "$f" ]; then
+                echo "$f" && mv "$f" "linux-x64-$ext" && break
+              fi
+            done
+            if [ ! -e "linux-x64-$ext" ]; then echo "ERROR: linux-x64-$ext not found!"; exit 1; fi
+          done
+        elif [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
+          for ext in deb rpm tar.gz; do
+            for f in *.$ext; do
+              if [ -e "$f" ]; then
+                echo "$f" && mv "$f" "linux-arm64-$ext" && break
+              fi
+            done
+            if [ ! -e "linux-arm64-$ext" ]; then echo "ERROR: linux-arm64-$ext not found!"; exit 1; fi
+          done
+        elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+          for f in *.tar.gz; do
+            if [ -e "$f" ]; then
+              echo "$f" && mv "$f" "macos-arm64-tar.gz" && break
+            fi
+          done
+          if [ ! -e macos-arm64-tar.gz ]; then echo "ERROR: macos-arm64-tar.gz not found!"; exit 1; fi
+        fi
+      shell: bash
+
+    - name: Upload DEB package
+      if: (matrix.os == 'ubuntu-latest' || matrix.os == 'ubuntu-24.04-arm')
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.os == 'ubuntu-latest' && 'linux-x64-deb' || 'linux-arm64-deb' }}
+        path: linux-*-deb
+        retention-days: 30
+
+    - name: Upload RPM package
+      if: (matrix.os == 'ubuntu-latest' || matrix.os == 'ubuntu-24.04-arm')
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.os == 'ubuntu-latest' && 'linux-x64-rpm' || 'linux-arm64-rpm' }}
+        path: linux-*-rpm
+        retention-days: 30
+
+    - name: Upload TGZ package
+      if: (matrix.os == 'ubuntu-latest' || matrix.os == 'ubuntu-24.04-arm' || matrix.os == 'macos-latest')
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.os == 'ubuntu-latest' && 'linux-x64-tar' || matrix.os == 'ubuntu-24.04-arm' && 'linux-arm64-tar' || 'macos-arm64-tar' }}
+        path: '*-tar.gz'
+        retention-days: 30
+
+    - name: Upload WIX installer
+      if: matrix.os == 'windows-latest'
+      uses: actions/upload-artifact@v4
+      with:
+        name: windows-x64-installer
+        path: windows-x64-installer.msi
+        retention-days: 30

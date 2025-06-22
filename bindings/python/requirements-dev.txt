@@ -1,0 +1,22 @@
+# Development dependencies for pyomgmatch
+# Install with: pip install -r requirements-dev.txt
+
+# Testing
+pytest>=8.0.0
+pytest-cov>=4.0.0
+coverage>=7.0.0
+
+# Code formatting and linting
+black>=22.0.0
+isort>=5.10.0
+flake8>=5.0.0
+mypy>=1.0.0
+
+# Security scanning
+bandit>=1.7.0
+safety>=2.0.0
+
+# Build tools
+build>=0.10.0
+twine>=4.0.0
+wheel>=0.38.0

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(lib_omega_match VERSION 0.1.0 LANGUAGES C)
+project(omega_match VERSION 0.1.0 LANGUAGES C)
 
 # Project Version - try to determine from git first, then fallback to hardcoded
 find_package(Git QUIET)
@@ -25,24 +25,25 @@ if (Git_FOUND)
             message(STATUS "Version extracted from git tag: ${GIT_TAG}")
         else()
             message(WARNING "Could not parse git tag '${GIT_TAG}', using fallback version")
-            set(PROJECT_VERSION_MAJOR 1)
+            set(PROJECT_VERSION_MAJOR 0)
             set(PROJECT_VERSION_MINOR 0)
-            set(PROJECT_VERSION_PATCH 3)
+            set(PROJECT_VERSION_PATCH 0)
         endif()
     else()
         message(STATUS "No git tag found, using fallback version")
-        set(PROJECT_VERSION_MAJOR 1)
+        set(PROJECT_VERSION_MAJOR 0)
         set(PROJECT_VERSION_MINOR 0)
-        set(PROJECT_VERSION_PATCH 3)
+        set(PROJECT_VERSION_PATCH 0)
     endif()
 else()
     message(STATUS "Git not found, using fallback version")
-    set(PROJECT_VERSION_MAJOR 1)
+    set(PROJECT_VERSION_MAJOR 0)
     set(PROJECT_VERSION_MINOR 0)
-    set(PROJECT_VERSION_PATCH 3)
+    set(PROJECT_VERSION_PATCH 0)
 endif()
 
 set(PROJECT_VERSION "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${PROJECT_VERSION_PATCH}")
+message(STATUS "Project version: ${PROJECT_VERSION}")
 
 # ---------------------------------------------------------------------------
 # Options
@@ -366,3 +367,77 @@ else()
 endif()
 
 include(CPack)
+
+# ---------------------------------------------------------------------------
+# Copy shared library to Python bindings with platform-specific name
+# ---------------------------------------------------------------------------
+set(PYBINDINGS_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/bindings/python/omega_match/native/lib")
+file(MAKE_DIRECTORY ${PYBINDINGS_LIB_DIR})
+
+if (WIN32)
+    # Only x64 currently provided for Windows
+    if (CMAKE_SIZEOF_VOID_P EQUAL 8)
+        add_custom_command(TARGET omega_match_shared POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:omega_match_shared>
+                "${PYBINDINGS_LIB_DIR}/libomega_match-windows-x64.dll"
+            COMMENT "Copying Windows x64 DLL to Python bindings native/lib directory"
+        )
+    endif()
+elseif(APPLE)
+    if (CMAKE_OSX_ARCHITECTURES MATCHES "arm64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
+        add_custom_command(TARGET omega_match_shared POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:omega_match_shared>
+                "${PYBINDINGS_LIB_DIR}/libomega_match-macos-arm64.dylib"
+            COMMENT "Copying macOS arm64 dylib to Python bindings native/lib directory"
+        )
+    elseif (CMAKE_OSX_ARCHITECTURES MATCHES "x86_64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
+        add_custom_command(TARGET omega_match_shared POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:omega_match_shared>
+                "${PYBINDINGS_LIB_DIR}/libomega_match-macos-x64.dylib"
+            COMMENT "Copying macOS x64 dylib to Python bindings native/lib directory"
+        )
+    endif()
+elseif(UNIX)
+    if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
+        add_custom_command(TARGET omega_match_shared POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:omega_match_shared>
+                "${PYBINDINGS_LIB_DIR}/libomega_match-linux-x64.so"
+            COMMENT "Copying Linux x64 .so to Python bindings native/lib directory"
+        )
+    elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
+        add_custom_command(TARGET omega_match_shared POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:omega_match_shared>
+                "${PYBINDINGS_LIB_DIR}/libomega_match-linux-arm64.so"
+            COMMENT "Copying Linux arm64 .so to Python bindings native/lib directory"
+        )
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# Build Python wheel for bindings (optional target)
+# ---------------------------------------------------------------------------
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_custom_target(python_wheel
+    COMMAND ${Python3_EXECUTABLE} -m build --wheel
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bindings/python
+    COMMENT "Building Python wheel for omega_match Python bindings"
+)
+add_dependencies(python_wheel omega_match_shared)
+
+add_custom_target(python_binding_tests
+    COMMAND ${Python3_EXECUTABLE} -m pip install -e .
+    COMMAND ${Python3_EXECUTABLE} -m pytest tests
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bindings/python
+    COMMENT "Running Python pytest suite for omega_match"
+)
+add_dependencies(python_binding_tests python_wheel)
+
+add_test(NAME python_pytest
+    COMMAND ${Python3_EXECUTABLE} -m pytest tests
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bindings/python
+)

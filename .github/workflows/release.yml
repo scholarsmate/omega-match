@@ -19,211 +19,18 @@ env:
   BUILD_TYPE: Release
 
 jobs:
-  build-and-package:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Windows builds
-          - os: windows-latest
-            arch: x64
-            cmake_config: "-G \"Visual Studio 17 2022\" -A x64 -DCMAKE_BUILD_TYPE=Release"
-            package_format: WIX
-            artifact_name: windows-x64-installer
-            
-          # Linux builds
-          - os: ubuntu-latest
-            arch: x64
-            preset: release
-            package_format: DEB
-            artifact_name: linux-x64-deb
-            
-          - os: ubuntu-latest
-            arch: x64
-            preset: release
-            package_format: RPM
-            artifact_name: linux-x64-rpm
-            
-          - os: ubuntu-latest
-            arch: x64
-            preset: release
-            package_format: TGZ
-            artifact_name: linux-x64-tar
-            
-          # Linux ARM64 builds (native runner)
-          - os: ubuntu-24.04-arm
-            arch: arm64
-            package_format: DEB
-            artifact_name: linux-arm64-deb
-
-          - os: ubuntu-24.04-arm
-            arch: arm64
-            package_format: RPM
-            artifact_name: linux-arm64-rpm
-
-          - os: ubuntu-24.04-arm
-            arch: arm64
-            package_format: TGZ
-            artifact_name: linux-arm64-tar
-
-          # macOS builds (Apple Silicon only)
-          - os: macos-latest
-            arch: arm64
-            preset: macos-release
-            package_format: TGZ
-            artifact_name: macos-arm64-tar
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up build environment (Windows)
-      if: runner.os == 'Windows'
-      uses: ilammy/msvc-dev-cmd@v1
-      with:
-        arch: ${{ matrix.arch }}
-
-    - name: Install dependencies (Linux)
-      if: runner.os == 'Linux'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y cmake build-essential ninja-build libomp-dev rpm
-
-    - name: Install dependencies (macOS)
-      if: runner.os == 'macOS'
-      run: |
-        brew install libomp
-        brew upgrade cmake ninja
-
-    - name: Configure CMake
-      run: |
-        if [ -n "${{ matrix.preset }}" ]; then
-          cmake --preset ${{ matrix.preset }}
-        else
-          cmake -B build ${{ matrix.cmake_config }}
-        fi
-      shell: bash
-
-    - name: Build
-      run: |
-        if [ -n "${{ matrix.preset }}" ]; then
-          cmake --build --preset ${{ matrix.preset }}
-        else
-          cmake --build build --config Release
-        fi
-      shell: bash
-
-    - name: Test
-      run: |
-        if [ -n "${{ matrix.preset }}" ]; then
-          # Map preset names to their actual binary directories
-          if [ "${{ matrix.preset }}" = "release" ]; then
-            BUILD_DIR="build-gcc-release"
-          elif [ "${{ matrix.preset }}" = "macos-release" ]; then
-            BUILD_DIR="build-clang-release"
-          elif [ "${{ matrix.preset }}" = "debug" ]; then
-            BUILD_DIR="build-gcc-debug"
-          elif [ "${{ matrix.preset }}" = "msvc-release" ]; then
-            BUILD_DIR="build-msvc-release"
-          elif [ "${{ matrix.preset }}" = "msvc-debug" ]; then
-            BUILD_DIR="build-msvc-debug"
-          else
-            BUILD_DIR="cmake-build-${{ matrix.preset }}"
-          fi
-          ctest --test-dir "$BUILD_DIR" --output-on-failure
-        else
-          cd build
-          ctest --build-config Release --output-on-failure
-        fi
-      shell: bash
-
-    - name: Package
-      run: |
-        if [ -n "${{ matrix.preset }}" ]; then
-          # Map preset names to their actual binary directories
-          if [ "${{ matrix.preset }}" = "release" ]; then
-            BUILD_DIR="build-gcc-release"
-          elif [ "${{ matrix.preset }}" = "macos-release" ]; then
-            BUILD_DIR="build-clang-release"
-          elif [ "${{ matrix.preset }}" = "debug" ]; then
-            BUILD_DIR="build-gcc-debug"
-          elif [ "${{ matrix.preset }}" = "msvc-release" ]; then
-            BUILD_DIR="build-msvc-release"
-          elif [ "${{ matrix.preset }}" = "msvc-debug" ]; then
-            BUILD_DIR="build-msvc-debug"
-          else
-            BUILD_DIR="cmake-build-${{ matrix.preset }}"
-          fi
-          cd "$BUILD_DIR"
-        else
-          cd build
-        fi
-        if [ "${{ matrix.package_format }}" = "WIX" ]; then
-          cpack -G WIX
-        elif [ "${{ matrix.package_format }}" = "DEB" ]; then
-          cpack -G DEB
-        elif [ "${{ matrix.package_format }}" = "RPM" ]; then
-          cpack -G RPM
-        else
-          cpack -G TGZ
-        fi
-      shell: bash
-
-    - name: Find package files
-      id: find_packages
-      run: |
-        if [ -n "${{ matrix.preset }}" ]; then
-          # Map preset names to their actual binary directories
-          if [ "${{ matrix.preset }}" = "release" ]; then
-            BUILD_DIR="build-gcc-release"
-          elif [ "${{ matrix.preset }}" = "macos-release" ]; then
-            BUILD_DIR="build-clang-release"
-          elif [ "${{ matrix.preset }}" = "debug" ]; then
-            BUILD_DIR="build-gcc-debug"
-          elif [ "${{ matrix.preset }}" = "msvc-release" ]; then
-            BUILD_DIR="build-msvc-release"
-          elif [ "${{ matrix.preset }}" = "msvc-debug" ]; then
-            BUILD_DIR="build-msvc-debug"
-          else
-            BUILD_DIR="cmake-build-${{ matrix.preset }}"
-          fi
-          cd "$BUILD_DIR"
-        else
-          cd build
-        fi
-        if [ "${{ matrix.package_format }}" = "WIX" ]; then
-          echo "package_file=$(ls *.msi | head -1)" >> $GITHUB_OUTPUT
-        elif [ "${{ matrix.package_format }}" = "DEB" ]; then
-          echo "package_file=$(ls *.deb | head -1)" >> $GITHUB_OUTPUT
-        elif [ "${{ matrix.package_format }}" = "RPM" ]; then
-          echo "package_file=$(ls *.rpm | head -1)" >> $GITHUB_OUTPUT
-        else
-          echo "package_file=$(ls *.tar.gz | head -1)" >> $GITHUB_OUTPUT
-        fi
-        echo "build_dir=$BUILD_DIR" >> $GITHUB_OUTPUT
-      shell: bash
-
-    - name: Upload build artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ matrix.artifact_name }}
-        path: |
-          ${{ steps.find_packages.outputs.build_dir && format('{0}/{1}', steps.find_packages.outputs.build_dir, steps.find_packages.outputs.package_file) || format('build/{0}', steps.find_packages.outputs.package_file) }}
-        retention-days: 30
+  # Remove build-and-package job and all references to it
 
   create-release:
-    needs: build-and-package
+    needs: test-universal-wheel
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    
     steps:
     - uses: actions/checkout@v4
-    
-    - name: Download all artifacts
+    - name: Download all package artifacts
       uses: actions/download-artifact@v4
       with:
         path: artifacts/
-    
     - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
@@ -233,23 +40,27 @@ jobs:
         prerelease: false
         generate_release_notes: true
         files: |
-          artifacts/**/*
+          artifacts/**/linux-x64-deb
+          artifacts/**/linux-x64-rpm
+          artifacts/**/linux-x64-tar
+          artifacts/**/linux-arm64-deb
+          artifacts/**/linux-arm64-rpm
+          artifacts/**/linux-arm64-tar
+          artifacts/**/macos-arm64-tar
+          artifacts/**/windows-x64-installer
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   create-manual-release:
-    needs: build-and-package
+    needs: test-universal-wheel
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch'
-    
     steps:
     - uses: actions/checkout@v4
-    
-    - name: Download all artifacts
+    - name: Download all package artifacts
       uses: actions/download-artifact@v4
       with:
         path: artifacts/
-    
     - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
@@ -259,6 +70,82 @@ jobs:
         prerelease: false
         generate_release_notes: true
         files: |
-          artifacts/**/*
+          artifacts/**/linux-x64-deb
+          artifacts/**/linux-x64-rpm
+          artifacts/**/linux-x64-tar
+          artifacts/**/linux-arm64-deb
+          artifacts/**/linux-arm64-rpm
+          artifacts/**/linux-arm64-tar
+          artifacts/**/macos-arm64-tar
+          artifacts/**/windows-x64-installer
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-universal-wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all native lib artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: native-libs/
+
+      - name: Prepare native libs for wheel
+        run: |
+          mkdir -p bindings/python/omega_match/native/lib
+          cp native-libs/native-lib-linux-x64/libomega_match-linux-x64.so bindings/python/omega_match/native/lib/ || true
+          cp native-libs/native-lib-linux-arm64/libomega_match-linux-arm64.so bindings/python/omega_match/native/lib/ || true
+          cp native-libs/native-lib-windows-x64/libomega_match-windows-x64.dll bindings/python/omega_match/native/lib/ || true
+          cp native-libs/native-lib-macos-arm64/libomega_match-macos-arm64.dylib bindings/python/omega_match/native/lib/ || true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+
+      - name: Build universal wheel
+        run: |
+          cd bindings/python
+          python -m build --wheel
+
+      - name: Upload universal wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: omega_match-universal-wheel
+          path: bindings/python/dist/*.whl
+          retention-days: 7
+
+  test-universal-wheel:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Download universal wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: omega_match-universal-wheel
+          path: dist/
+
+      - name: Install wheel and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install dist/*.whl pytest pytest-cov
+
+      - name: Run Python tests against installed wheel
+        run: |
+          pytest --pyargs omega_match

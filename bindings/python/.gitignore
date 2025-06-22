@@ -1,0 +1,13 @@
+*.egg
+*.egg-info/
+*.log
+*.pyc
+*.pyo
+.build-venv/
+.coverage
+.idea/
+.venv/
+.vscode/
+__pycache__/
+dist/
+omega_match/native/lib/*

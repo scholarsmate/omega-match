@@ -273,10 +273,10 @@ int omega_matcher_set_chunk_size(omega_list_matcher_t *restrict matcher,
 int omega_matcher_get_chunk_size(const omega_list_matcher_t *restrict matcher);
 
 /**
- * Get the version string of the matcher library.
+ * Get the version string of the library.
  * @return Version string.
  */
-const char *omega_matcher_version(void);
+const char *omega_match_version(void);
 
 #ifdef __cplusplus
 }

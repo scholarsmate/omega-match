@@ -44,11 +44,11 @@ def main():
     
     # Print the version
     try:
-        omega_match.omega_matcher_version.restype = ctypes.c_char_p
-        version = omega_match.omega_matcher_version().decode('utf-8')
+        omega_match.omega_match_version.restype = ctypes.c_char_p
+        version = omega_match.omega_match_version().decode('utf-8')
         print(f"⭐ Omega Match Version: {version}\n")
     except AttributeError:
-        print("Version function 'omega_matcher_version' not found in the library.\n")
+        print("Version function 'omega_match_version' not found in the library.\n")
 
     # Example: Get version (if such function exists)
     # This is just a demonstration - you'd need to check the actual C API

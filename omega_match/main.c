@@ -145,7 +145,7 @@ static void usage(const char *prog) {
           "Run \"%s <command> --help\" for more information on a command.\n",
           prog);
   fprintf(stderr, "\n");
-  fprintf(stderr, "Version: %s\n", omega_matcher_version());
+  fprintf(stderr, "Version: %s\n", omega_match_version());
 }
 
 // Help for 'compile'
@@ -158,7 +158,7 @@ static void compile_usage(const char *prog) {
   fprintf(stderr, "  -v, --verbose         Enable verbose output\n");
   fprintf(stderr, "  -h, --help            Show this help message\n");
   fprintf(stderr, "\n");
-  fprintf(stderr, "Version: %s\n", omega_matcher_version());
+  fprintf(stderr, "Version: %s\n", omega_match_version());
 }
 
 // Help for 'match'
@@ -187,7 +187,7 @@ static void match_usage(const char *prog) {
   fprintf(stderr, "  -v, --verbose         Enable verbose output\n");
   fprintf(stderr, "  -h, --help            Show this help message\n");
   fprintf(stderr, "\n");
-  fprintf(stderr, "Version: %s\n", omega_matcher_version());
+  fprintf(stderr, "Version: %s\n", omega_match_version());
 }
 
 int main(const int argc, char *argv[]) {
