@@ -15,9 +15,10 @@ jobs:
       fail-fast: false
 
       # Test cross-platform compatibility
-      # 1. <Windows, MSVC>
-      # 2. <Linux, GCC>
-      # 3. <macOS, Clang>
+      # 1. <Windows, x64, MSVC>
+      # 2. <Linux, x64, GCC>
+      # 3. <Linux, arm64, GCC>
+      # 4. <macOS, arm64, Clang>
       matrix:
         include:
           # Windows (MSVC)
@@ -35,6 +36,14 @@ jobs:
             cpp_compiler: g++
             cmake_args: ""
             name: "Linux-GCC"
+          # Linux ARM64 (native)
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            build_type: Release
+            c_compiler: gcc
+            cpp_compiler: g++
+            cmake_args: ""
+            name: "Linux-ARM64"
           # macOS Clang
           - os: macos-latest
             arch: arm64
@@ -69,6 +78,8 @@ jobs:
       run: |
         if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
           cmake --preset release
+        elif [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
+          cmake --preset release
         elif [ "${{ matrix.os }}" = "macos-latest" ]; then
           cmake --preset macos-release
         else
@@ -80,6 +91,8 @@ jobs:
       run: |
         if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
           cmake --build --preset release
+        elif [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
+          cmake --build --preset release
         elif [ "${{ matrix.os }}" = "macos-latest" ]; then
           cmake --build --preset macos-release
         else
@@ -90,6 +103,8 @@ jobs:
     - name: Test
       run: |
         if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+          ctest --test-dir build-gcc-release --output-on-failure
+        elif [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
           ctest --test-dir build-gcc-release --output-on-failure
         elif [ "${{ matrix.os }}" = "macos-latest" ]; then
           ctest --test-dir build-clang-release --output-on-failure
@@ -104,7 +119,7 @@ jobs:
       with:
         name: ${{ matrix.name }}-binary
         path: |
-          ${{ matrix.os == 'ubuntu-latest' && 'build-gcc-release/olm' || matrix.os == 'macos-latest' && 'build-clang-release/olm' || 'build/Release/olm.exe' }}
-          ${{ matrix.os == 'ubuntu-latest' && 'build-gcc-release/libomega_match*' || matrix.os == 'macos-latest' && 'build-clang-release/libomega_match*' || 'build/Release/omega_match*' }}
+          ${{ matrix.os == 'ubuntu-latest' && 'build-gcc-release/olm' || matrix.os == 'ubuntu-24.04-arm' && 'build-gcc-release/olm' || matrix.os == 'macos-latest' && 'build-clang-release/olm' || 'build/Release/olm.exe' }}
+          ${{ matrix.os == 'ubuntu-latest' && 'build-gcc-release/libomega_match*' || matrix.os == 'ubuntu-24.04-arm' && 'build-gcc-release/libomega_match*' || matrix.os == 'macos-latest' && 'build-clang-release/libomega_match*' || 'build/Release/omega_match*' }}
           ${{ matrix.os == 'windows-latest' && 'build/Release/*.pdb' || '' }}
         retention-days: 7

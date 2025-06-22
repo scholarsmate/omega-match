@@ -51,7 +51,23 @@ jobs:
             package_format: TGZ
             artifact_name: linux-x64-tar
             
-          # macOS builds
+          # Linux ARM64 builds (native runner)
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            package_format: DEB
+            artifact_name: linux-arm64-deb
+
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            package_format: RPM
+            artifact_name: linux-arm64-rpm
+
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            package_format: TGZ
+            artifact_name: linux-arm64-tar
+
+          # macOS builds (Apple Silicon only)
           - os: macos-latest
             arch: arm64
             preset: macos-release
