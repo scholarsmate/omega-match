@@ -1,0 +1,16 @@
+*.a
+*.bak
+*.ddl
+*.log
+*.o
+*.so
+*.tmp
+.idea/
+.venv/
+CMakeCache.txt
+cmake-*/
+build*/
+dist/
+perf_results.csv
+perf_results.png
+__pycache__/

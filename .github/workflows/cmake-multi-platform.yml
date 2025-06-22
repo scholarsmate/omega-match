@@ -1,0 +1,110 @@
+name: CI Build and Test
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      # Set fail-fast to false ensuring that feedback is delivered for all matrix combinations. Consider changing this to true when your workflow is stable.
+      fail-fast: false
+
+      # Test cross-platform compatibility
+      # 1. <Windows, MSVC>
+      # 2. <Linux, GCC>
+      # 3. <macOS, Clang>
+      matrix:
+        include:
+          # Windows (MSVC)
+          - os: windows-latest
+            arch: x64
+            build_type: Release
+            generator: "Visual Studio 17 2022"
+            cmake_args: ""
+            name: "Windows-MSVC"
+          # Ubuntu GCC
+          - os: ubuntu-latest
+            arch: x64
+            build_type: Release
+            c_compiler: gcc
+            cpp_compiler: g++
+            cmake_args: ""
+            name: "Linux-GCC"
+          # macOS Clang
+          - os: macos-latest
+            arch: arm64
+            build_type: Release
+            c_compiler: clang
+            cpp_compiler: clang++
+            cmake_args: ""
+            name: "macOS-Clang"
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake build-essential ninja-build libomp-dev
+
+    - name: Install dependencies (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        brew install libomp
+        brew upgrade cmake ninja
+
+    - name: Set reusable strings
+      id: strings
+      shell: bash
+      run: |
+        echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
+
+    - name: Configure CMake
+      run: |
+        if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+          cmake --preset release
+        elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+          cmake --preset macos-release
+        else
+          cmake -B build -G "${{ matrix.generator }}" -A x64 -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} ${{ matrix.cmake_args }}
+        fi
+      shell: bash
+
+    - name: Build
+      run: |
+        if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+          cmake --build --preset release
+        elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+          cmake --build --preset macos-release
+        else
+          cmake --build build --config ${{ matrix.build_type }}
+        fi
+      shell: bash
+
+    - name: Test
+      run: |
+        if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+          ctest --test-dir build-gcc-release --output-on-failure
+        elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+          ctest --test-dir build-clang-release --output-on-failure
+        else
+          ctest --test-dir build --output-on-failure --build-config ${{ matrix.build_type }}
+        fi
+      shell: bash
+
+    # Only upload artifacts for successful builds (no packaging needed for CI)
+    - name: Upload CLI Binary and PDBs
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.name }}-binary
+        path: |
+          ${{ matrix.os == 'ubuntu-latest' && 'build-gcc-release/olm' || matrix.os == 'macos-latest' && 'build-clang-release/olm' || 'build/Release/olm.exe' }}
+          ${{ matrix.os == 'ubuntu-latest' && 'build-gcc-release/libomega_match*' || matrix.os == 'macos-latest' && 'build-clang-release/libomega_match*' || 'build/Release/omega_match*' }}
+          ${{ matrix.os == 'windows-latest' && 'build/Release/*.pdb' || '' }}
+        retention-days: 7

@@ -1,0 +1,9 @@
+# Example haystack for suffix/prefix tests
+alice@example.com and bob@university.edu both work in education, not .education.
+carol@nonprofit.org, dave@company.us
+foo@bar.com; notadomaincom
+user@omg.ai
+userx@ai.omg
+prefixuser@domain.com
+xuser@domain.com and this one shouldn't match kabob@nomatch.usa anything.
+.com .orgg org *.org

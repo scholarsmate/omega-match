@@ -1,0 +1,200 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "release",
+      "displayName": "Release build (Ninja + GCC)",
+      "generator": "Ninja",
+      "description": "Optimised build with GCC",
+      "binaryDir": "build-gcc-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "gcc"
+      }
+    },
+    {
+      "name": "debug",
+      "displayName": "Debug build (Ninja + GCC)",
+      "generator": "Ninja",
+      "binaryDir": "build-gcc-debug",
+      "description": "Full symbols, no optimisation, extra warnings",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "gcc",
+        "OMEGA_MATCH_WARNINGS_AS_ERRORS": "ON"
+      }
+    }
+    ,
+    {
+      "name": "msvc-release",
+      "displayName": "Release build (Visual Studio 2022)",
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "build-msvc-release",
+      "description": "Optimised build with MSVC",
+      "architecture": {
+        "value": "x64"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "msvc-debug",
+      "displayName": "Debug build (Visual Studio 2022)",
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "build-msvc-debug",
+      "description": "Debug build with MSVC",
+      "architecture": {
+        "value": "x64"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "OMEGA_MATCH_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "macos-release",
+      "displayName": "Release build (Ninja + Clang + libomp)",
+      "generator": "Ninja",
+      "binaryDir": "build-clang-release",
+      "description": "Optimised build for macOS with libomp",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "clang"
+      },
+      "environment": {
+        "LDFLAGS": "-L/opt/homebrew/opt/libomp/lib -L/usr/local/opt/libomp/lib",
+        "CPPFLAGS": "-I/opt/homebrew/opt/libomp/include -I/usr/local/opt/libomp/include",
+        "CC": "clang",
+        "CXX": "clang++",
+        "OpenMP_ROOT": "/opt/homebrew/opt/libomp:/usr/local/opt/libomp",
+        "OpenMP_C_FLAGS": "-Xpreprocessor -fopenmp",
+        "OpenMP_C_LIB_NAMES": "omp",
+        "OpenMP_CXX_FLAGS": "-Xpreprocessor -fopenmp",
+        "OpenMP_CXX_LIB_NAMES": "omp",
+        "OpenMP_omp_LIBRARY": "/opt/homebrew/opt/libomp/lib/libomp.dylib"
+      }
+    },
+    {
+      "name": "macos-debug",
+      "displayName": "Debug build (Ninja + Clang + libomp)",
+      "generator": "Ninja",
+      "binaryDir": "build-clang-debug",
+      "description": "Debug build for macOS with libomp",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "clang"
+      },
+      "environment": {
+        "LDFLAGS": "-L/opt/homebrew/opt/libomp/lib -L/usr/local/opt/libomp/lib",
+        "CPPFLAGS": "-I/opt/homebrew/opt/libomp/include -I/usr/local/opt/libomp/include",
+        "CC": "clang",
+        "CXX": "clang++",
+        "OpenMP_ROOT": "/opt/homebrew/opt/libomp:/usr/local/opt/libomp",
+        "OpenMP_C_FLAGS": "-Xpreprocessor -fopenmp",
+        "OpenMP_C_LIB_NAMES": "omp",
+        "OpenMP_CXX_FLAGS": "-Xpreprocessor -fopenmp",
+        "OpenMP_CXX_LIB_NAMES": "omp",
+        "OpenMP_omp_LIBRARY": "/opt/homebrew/opt/libomp/lib/libomp.dylib"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "description": "Build everything in Release mode",
+      "jobs": 0
+    },
+    {
+      "name": "debug",
+      "configurePreset": "debug",
+      "description": "Build everything with symbols, no optimisation",
+      "jobs": 0
+    },
+    {
+      "name": "msvc-release",
+      "configurePreset": "msvc-release",
+      "description": "Build with MSVC in Release mode",
+      "configuration": "Release",
+      "jobs": 0
+    },
+    {
+      "name": "msvc-debug",
+      "configurePreset": "msvc-debug",
+      "description": "Build with MSVC in Debug mode",
+      "configuration": "Debug",
+      "jobs": 0
+    },
+    {
+      "name": "macos-release",
+      "configurePreset": "macos-release",
+      "description": "Build with Clang and libomp on macOS in Release mode",
+      "jobs": 0
+    },
+    {
+      "name": "macos-debug",
+      "configurePreset": "macos-debug",
+      "description": "Build with Clang and libomp on macOS in Debug mode",
+      "jobs": 0
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "debug",
+      "displayName": "Run unit & integration tests (Debug build)",
+      "configurePreset": "debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "stopOnFailure": true
+      },
+      "environment": {
+        "CTEST_PARALLEL_LEVEL": "0"
+      }
+    },
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "msvc-debug",
+      "displayName": "Run unit & integration tests (MSVC Debug)",
+      "configurePreset": "msvc-debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "stopOnFailure": true
+      },
+      "environment": {
+        "CTEST_PARALLEL_LEVEL": "0"
+      }
+    },
+    {
+      "name": "msvc-release",
+      "configurePreset": "msvc-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "macos-release",
+      "configurePreset": "macos-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "macos-debug",
+      "configurePreset": "macos-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+This has exact in middle
+exact
+Another line with text
