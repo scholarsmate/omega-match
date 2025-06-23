@@ -1,1 +1,2 @@
-recursive-include omega_match/native *
+recursive-include omega_match/native/lib *
+include omega_match/py.typed

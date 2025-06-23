@@ -144,6 +144,31 @@ jobs:
         fi
       shell: bash
 
+    - name: Copy native library to Python package location (linux-x64)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        mkdir -p bindings/python/omega_match/native/lib
+        cp build-gcc-release/libomega_match.so bindings/python/omega_match/native/lib/libomega_match-linux-x64.so
+
+    - name: Copy native library to Python package location (linux-arm64)
+      if: matrix.os == 'ubuntu-24.04-arm'
+      run: |
+        mkdir -p bindings/python/omega_match/native/lib
+        cp build-gcc-release/libomega_match.so bindings/python/omega_match/native/lib/libomega_match-linux-arm64.so
+
+    - name: Copy native library to Python package location (windows-x64)
+      if: matrix.os == 'windows-latest'
+      run: |
+        mkdir -p bindings/python/omega_match/native/lib
+        cp build/Release/omega_match.dll bindings/python/omega_match/native/lib/libomega_match-windows-x64.dll
+      shell: bash
+
+    - name: Copy native library to Python package location (macos-arm64)
+      if: matrix.os == 'macos-latest'
+      run: |
+        mkdir -p bindings/python/omega_match/native/lib
+        cp build-clang-release/libomega_match.dylib bindings/python/omega_match/native/lib/libomega_match-macos-arm64.dylib
+
     - name: Upload native library artifact (linux-x64)
       if: matrix.os == 'ubuntu-latest'
       uses: actions/upload-artifact@v4
@@ -245,6 +270,7 @@ jobs:
           test -f native-libs/native-lib-linux-arm64/libomega_match-linux-arm64.so
           test -f native-libs/native-lib-windows-x64/libomega_match-windows-x64.dll
           test -f native-libs/native-lib-macos-arm64/libomega_match-macos-arm64.dylib
+        shell: bash
 
       - name: Prepare native libs for wheel
         run: |
@@ -297,17 +323,87 @@ jobs:
           name: omega_match-universal-wheel
           path: dist/
 
+      - name: List dist directory contents (debug)
+        run: |
+          ls -l dist || dir dist
+        shell: bash
+
       - name: Install wheel and test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install dist/*.whl pytest pytest-cov
+          python -m pip install $(python -c "import glob; files=glob.glob('dist/*.whl'); print(files[0] if files else '')") pytest pytest-cov
+
+      - name: Download native-lib-linux-x64
+        uses: actions/download-artifact@v4
+        with:
+          name: native-lib-linux-x64
+          path: native-libs/native-lib-linux-x64
+
+      - name: Download native-lib-linux-arm64
+        uses: actions/download-artifact@v4
+        with:
+          name: native-lib-linux-arm64
+          path: native-libs/native-lib-linux-arm64
+
+      - name: Download native-lib-windows-x64
+        uses: actions/download-artifact@v4
+        with:
+          name: native-lib-windows-x64
+          path: native-libs/native-lib-windows-x64
+
+      - name: Download native-lib-macos-arm64
+        uses: actions/download-artifact@v4
+        with:
+          name: native-lib-macos-arm64
+          path: native-libs/native-lib-macos-arm64
+
+      - name: Check all native libs are present
+        run: |
+          set -e
+          test -f native-libs/native-lib-linux-x64/libomega_match-linux-x64.so
+          test -f native-libs/native-lib-linux-arm64/libomega_match-linux-arm64.so
+          test -f native-libs/native-lib-windows-x64/libomega_match-windows-x64.dll
+          test -f native-libs/native-lib-macos-arm64/libomega_match-macos-arm64.dylib
+        shell: bash
+
+      - name: Prepare native libs for test
+        run: |
+          mkdir -p bindings/python/omega_match/native/lib
+          cp native-libs/native-lib-linux-x64/libomega_match-linux-x64.so bindings/python/omega_match/native/lib/
+          cp native-libs/native-lib-linux-arm64/libomega_match-linux-arm64.so bindings/python/omega_match/native/lib/
+          cp native-libs/native-lib-windows-x64/libomega_match-windows-x64.dll bindings/python/omega_match/native/lib/
+          cp native-libs/native-lib-macos-arm64/libomega_match-macos-arm64.dylib bindings/python/omega_match/native/lib/
+        shell: bash
+
+      - name: Install libomp (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install libomp
 
       - name: Run Python tests against installed wheel
         run: |
-          pytest --pyargs omega_match
+          cd bindings/python
+          pytest tests/ -v
 
-  create-release:
+  publish-to-pypi:
     needs: [build-artifacts, test-universal-wheel]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - name: Download universal wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: omega_match-universal-wheel
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+  
+  create-release:
+    needs: [build-artifacts, test-universal-wheel, publish-to-pypi]
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
