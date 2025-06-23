@@ -306,8 +306,23 @@ jobs:
         run: |
           pytest --pyargs omega_match
 
-  create-release:
+  publish-to-pypi:
     needs: [build-artifacts, test-universal-wheel]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - name: Download universal wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: omega_match-universal-wheel
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  create-release:
+    needs: [build-artifacts, test-universal-wheel, publish-to-pypi]
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
