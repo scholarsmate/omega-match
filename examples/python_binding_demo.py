@@ -13,7 +13,33 @@ import ctypes
 import ctypes.util
 import os
 
+def find_local_omega_match_library():
+    dirs = []
+    pwd = os.getcwd()
+    buildDir = ''
+    
+    if pwd.endswith('omega-match'):
+        dirs = os.listdir('.')
+        
+        for dir in dirs:
+            if(dir.find('build') >= 0):
+                buildDir = dir
+        
+    elif pwd.endswith('examples'):
+        dirs = os.listdir('..')
+        
+        for dir in dirs:
+            if(dir.find('build') >= 0):
+                buildDir = "../" + dir
+    
+    if(os.path.exists(buildDir + "/libomega_match.so")):
+        return buildDir + "/libomega_match.so"
+
+    print("Could not locally resolve libomega_match.so. Please build the library.")
+    exit()
+        
 def find_omega_match_library():
+    
     """Find the omega_matchmatch shared library."""
     # Try common locations
     locations = [
@@ -33,7 +59,12 @@ def find_omega_match_library():
     lib_path = ctypes.util.find_library("omega_match")
     if lib_path:
         return lib_path
-        
+    
+    # Try local library search
+    lib_path = find_local_omega_match_library()
+    if lib_path:
+        return lib_path
+    
     raise FileNotFoundError("Could not find libomega_match.so. Please ensure it's installed.")
 
 def main():
