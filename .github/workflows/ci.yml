@@ -63,7 +63,7 @@ jobs:
       if: runner.os == 'Linux'
       run: |
         sudo apt-get update
-        sudo apt-get install -y cmake build-essential ninja-build libomp-dev
+        sudo apt-get install -y cmake build-essential ninja-build libomp-dev rpm
 
     - name: Install dependencies (macOS)
       if: runner.os == 'macOS'
@@ -171,6 +171,15 @@ jobs:
         path: bindings/python/omega_match/native/lib/libomega_match-macos-arm64.dylib
         retention-days: 7
 
+    - name: Install WiX Toolset
+      if: runner.os == 'Windows'
+      run: choco install wixtoolset --no-progress
+
+    - name: List build output (Windows)
+      if: runner.os == 'Windows'
+      run: dir build/Release
+      shell: pwsh
+
     - name: Package
       run: |
         if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
@@ -180,7 +189,7 @@ jobs:
         elif [ "${{ matrix.os }}" = "macos-latest" ]; then
           cd build-clang-release
         else
-          cd build/Release
+          cd build
         fi
         # Package for each platform
         if [ "${{ matrix.os }}" = "windows-latest" ]; then
@@ -202,37 +211,49 @@ jobs:
       run: |
         set -e
         if [ "${{ matrix.os }}" = "windows-latest" ]; then
+          cd build
+          found=0
           for f in *.msi; do
             if [ -e "$f" ]; then
-              echo "$f" && mv "$f" "windows-x64-installer.msi" && break
+              echo "Found MSI: $f"
+              found=1
             fi
           done
-          if [ ! -e windows-x64-installer.msi ]; then echo "ERROR: windows-x64-installer.msi not found!"; exit 1; fi
+          if [ $found -eq 0 ]; then echo "ERROR: No .msi found for Windows!"; exit 1; fi
         elif [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+          cd build-gcc-release
           for ext in deb rpm tar.gz; do
+            found=0
             for f in *.$ext; do
               if [ -e "$f" ]; then
-                echo "$f" && mv "$f" "linux-x64-$ext" && break
+                echo "Linux x64 CPack output: $f"
+                found=1
               fi
             done
-            if [ ! -e "linux-x64-$ext" ]; then echo "ERROR: linux-x64-$ext not found!"; exit 1; fi
+            if [ $found -eq 0 ]; then echo "ERROR: No .$ext found for linux-x64!"; exit 1; fi
           done
         elif [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
+          cd build-gcc-release
           for ext in deb rpm tar.gz; do
+            found=0
             for f in *.$ext; do
               if [ -e "$f" ]; then
-                echo "$f" && mv "$f" "linux-arm64-$ext" && break
+                echo "Linux arm64 CPack output: $f"
+                found=1
               fi
             done
-            if [ ! -e "linux-arm64-$ext" ]; then echo "ERROR: linux-arm64-$ext not found!"; exit 1; fi
+            if [ $found -eq 0 ]; then echo "ERROR: No .$ext found for linux-arm64!"; exit 1; fi
           done
         elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+          cd build-clang-release
+          found=0
           for f in *.tar.gz; do
             if [ -e "$f" ]; then
-              echo "$f" && mv "$f" "macos-arm64-tar.gz" && break
+              echo "macOS CPack output: $f"
+              found=1
             fi
           done
-          if [ ! -e macos-arm64-tar.gz ]; then echo "ERROR: macos-arm64-tar.gz not found!"; exit 1; fi
+          if [ $found -eq 0 ]; then echo "ERROR: No .tar.gz found for macOS!"; exit 1; fi
         fi
       shell: bash
 
@@ -241,29 +262,29 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.os == 'ubuntu-latest' && 'linux-x64-deb' || 'linux-arm64-deb' }}
-        path: linux-*-deb
-        retention-days: 30
+        path: ${{ matrix.os == 'ubuntu-latest' && 'build-gcc-release/*.deb' || 'build-gcc-release/*.deb' }}
+        retention-days: 7
 
     - name: Upload RPM package
       if: (matrix.os == 'ubuntu-latest' || matrix.os == 'ubuntu-24.04-arm')
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.os == 'ubuntu-latest' && 'linux-x64-rpm' || 'linux-arm64-rpm' }}
-        path: linux-*-rpm
-        retention-days: 30
+        path: ${{ matrix.os == 'ubuntu-latest' && 'build-gcc-release/*.rpm' || 'build-gcc-release/*.rpm' }}
+        retention-days: 7
 
     - name: Upload TGZ package
       if: (matrix.os == 'ubuntu-latest' || matrix.os == 'ubuntu-24.04-arm' || matrix.os == 'macos-latest')
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.os == 'ubuntu-latest' && 'linux-x64-tar' || matrix.os == 'ubuntu-24.04-arm' && 'linux-arm64-tar' || 'macos-arm64-tar' }}
-        path: '*-tar.gz'
-        retention-days: 30
+        path: ${{ matrix.os == 'macos-latest' && 'build-clang-release/*.tar.gz' || 'build-gcc-release/*.tar.gz' }}
+        retention-days: 7
 
     - name: Upload WIX installer
       if: matrix.os == 'windows-latest'
       uses: actions/upload-artifact@v4
       with:
         name: windows-x64-installer
-        path: windows-x64-installer.msi
-        retention-days: 30
+        path: build/*.msi
+        retention-days: 7

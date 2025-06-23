@@ -339,9 +339,9 @@ install(EXPORT omega_matchTargets
 # ---------------------------------------------------------------------------
 include(InstallRequiredSystemLibraries)
 
-set(CPACK_PACKAGE_NAME "omega_matchmatch")
+set(CPACK_PACKAGE_NAME "omega_match")
 set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
-set(CPACK_PACKAGE_CONTACT "omega_matchmatch maintainers")
+set(CPACK_PACKAGE_CONTACT "omega_match maintainers")
 set(CPACK_PACKAGE_FILE_NAME
     "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
 set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
@@ -356,12 +356,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
         set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_BINARY_DIR}/LICENSE.txt")
         list(APPEND CPACK_GENERATOR "WIX")
         set(CPACK_WIX_UPGRADE_GUID "0d7858ad-85b2-446d-8e5b-54f876ed5277")
+        set(CPACK_PACKAGE_VENDOR "Omega Development")
+        set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Omega Match - Fast mullti-pattern matching library")
+        # set(CPACK_WIX_PRODUCT_ICON "${CMAKE_SOURCE_DIR}/images/icon.ico") # Optional: icon path
     endif()
 else()
     set(CPACK_GENERATOR "TGZ")
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         list(APPEND CPACK_GENERATOR "DEB" "RPM")
-        set(CPACK_DEBIAN_PACKAGE_MAINTAINER "omega_matchmatch maintainers")
+        set(CPACK_DEBIAN_PACKAGE_MAINTAINER "omega_match maintainers")
         set(CPACK_RPM_PACKAGE_LICENSE "Apache 2.0")
     endif()
 endif()
