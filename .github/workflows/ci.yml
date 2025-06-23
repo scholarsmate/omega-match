@@ -3,6 +3,7 @@ name: CI Build and Test
 on:
   push:
     branches: [ "main" ]
+    tags: [ "v*" ]
   pull_request:
     branches: [ "main" ]
 
@@ -136,7 +137,7 @@ jobs:
           ${{ matrix.os == 'ubuntu-latest' && 'build-gcc-release/olm' || matrix.os == 'ubuntu-24.04-arm' && 'build-gcc-release/olm' || matrix.os == 'macos-latest' && 'build-clang-release/olm' || 'build/Release/olm.exe' }}
           ${{ matrix.os == 'ubuntu-latest' && 'build-gcc-release/libomega_match*' || matrix.os == 'ubuntu-24.04-arm' && 'build-gcc-release/libomega_match*' || matrix.os == 'macos-latest' && 'build-clang-release/libomega_match*' || 'build/Release/omega_match*' }}
           ${{ matrix.os == 'windows-latest' && 'build/Release/*.pdb' || '' }}
-        retention-days: 7
+        retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 30 || 7 }}
 
     # Upload native library artifacts for universal wheel
     - name: Upload native library artifact (linux-x64)
@@ -145,7 +146,7 @@ jobs:
       with:
         name: native-lib-linux-x64
         path: bindings/python/omega_match/native/lib/libomega_match-linux-x64.so
-        retention-days: 7
+        retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 30 || 7 }}
 
     - name: Upload native library artifact (linux-arm64)
       if: matrix.os == 'ubuntu-24.04-arm' && matrix.arch == 'arm64'
@@ -153,7 +154,7 @@ jobs:
       with:
         name: native-lib-linux-arm64
         path: bindings/python/omega_match/native/lib/libomega_match-linux-arm64.so
-        retention-days: 7
+        retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 30 || 7 }}
 
     - name: Upload native library artifact (windows-x64)
       if: matrix.os == 'windows-latest' && matrix.arch == 'x64'
@@ -161,7 +162,7 @@ jobs:
       with:
         name: native-lib-windows-x64
         path: bindings/python/omega_match/native/lib/libomega_match-windows-x64.dll
-        retention-days: 7
+        retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 30 || 7 }}
 
     - name: Upload native library artifact (macos-arm64)
       if: matrix.os == 'macos-latest' && matrix.arch == 'arm64'
@@ -169,7 +170,7 @@ jobs:
       with:
         name: native-lib-macos-arm64
         path: bindings/python/omega_match/native/lib/libomega_match-macos-arm64.dylib
-        retention-days: 7
+        retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 30 || 7 }}
 
     - name: Install WiX Toolset
       if: runner.os == 'Windows'
@@ -263,7 +264,7 @@ jobs:
       with:
         name: ${{ matrix.os == 'ubuntu-latest' && 'linux-x64-deb' || 'linux-arm64-deb' }}
         path: ${{ matrix.os == 'ubuntu-latest' && 'build-gcc-release/*.deb' || 'build-gcc-release/*.deb' }}
-        retention-days: 7
+        retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 30 || 7 }}
 
     - name: Upload RPM package
       if: (matrix.os == 'ubuntu-latest' || matrix.os == 'ubuntu-24.04-arm')
@@ -271,7 +272,7 @@ jobs:
       with:
         name: ${{ matrix.os == 'ubuntu-latest' && 'linux-x64-rpm' || 'linux-arm64-rpm' }}
         path: ${{ matrix.os == 'ubuntu-latest' && 'build-gcc-release/*.rpm' || 'build-gcc-release/*.rpm' }}
-        retention-days: 7
+        retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 30 || 7 }}
 
     - name: Upload TGZ package
       if: (matrix.os == 'ubuntu-latest' || matrix.os == 'ubuntu-24.04-arm' || matrix.os == 'macos-latest')
@@ -279,7 +280,7 @@ jobs:
       with:
         name: ${{ matrix.os == 'ubuntu-latest' && 'linux-x64-tar' || matrix.os == 'ubuntu-24.04-arm' && 'linux-arm64-tar' || 'macos-arm64-tar' }}
         path: ${{ matrix.os == 'macos-latest' && 'build-clang-release/*.tar.gz' || 'build-gcc-release/*.tar.gz' }}
-        retention-days: 7
+        retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 30 || 7 }}
 
     - name: Upload WIX installer
       if: matrix.os == 'windows-latest'
@@ -287,4 +288,4 @@ jobs:
       with:
         name: windows-x64-installer
         path: build/*.msi
-        retention-days: 7
+        retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 30 || 7 }}

@@ -1,10 +1,8 @@
 name: Release
 
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types:
-      - completed
+  push:
+    tags: [ "v*" ]
   workflow_dispatch:
     inputs:
       tag:
@@ -20,70 +18,199 @@ env:
   BUILD_TYPE: Release
 
 jobs:
+  build-artifacts:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x64
+            build_type: Release
+            generator: "Visual Studio 17 2022"
+            name: "Windows-MSVC"
+          - os: ubuntu-latest
+            arch: x64
+            build_type: Release
+            c_compiler: gcc
+            cpp_compiler: g++
+            name: "Linux-GCC"
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            build_type: Release
+            c_compiler: gcc
+            cpp_compiler: g++
+            name: "Linux-ARM64"
+          - os: macos-latest
+            arch: arm64
+            build_type: Release
+            c_compiler: clang
+            cpp_compiler: clang++
+            name: "macOS-Clang"
 
-  create-release:
-    needs: test-universal-wheel
-    runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run && startsWith(github.event.workflow_run.ref, 'refs/tags/v'))
     steps:
     - uses: actions/checkout@v4
-    - name: Download all package artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: artifacts/
-    - name: Create Release
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: ${{ github.ref_name }}
-        name: Release ${{ github.ref_name }}
-        draft: false
-        prerelease: false
-        generate_release_notes: true
-        files: |
-          artifacts/**/linux-x64-deb/*.deb
-          artifacts/**/linux-x64-rpm/*.rpm
-          artifacts/**/linux-x64-tar/*.tar.gz
-          artifacts/**/linux-arm64-deb/*.deb
-          artifacts/**/linux-arm64-rpm/*.rpm
-          artifacts/**/linux-arm64-tar/*.tar.gz
-          artifacts/**/macos-arm64-tar/*.tar.gz
-          artifacts/**/windows-x64-installer/*.msi
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  create-manual-release:
-    needs: test-universal-wheel
-    runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
-    steps:
-    - uses: actions/checkout@v4
-    - name: Download all package artifacts
-      uses: actions/download-artifact@v4
+    - name: Fetch all git tags
+      run: git fetch --tags --force
+
+    - name: Install dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake build-essential ninja-build libomp-dev rpm
+
+    - name: Install dependencies (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        brew install libomp
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
       with:
-        path: artifacts/
-    - name: Create Release
-      uses: softprops/action-gh-release@v1
+        python-version: '3.13'
+
+    - name: Install Python modules
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install build cffi pytest pytest-cov
+
+    - name: Configure CMake
+      run: |
+        if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+          cmake --preset release -DPython3_EXECUTABLE=$(which python)
+        elif [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
+          cmake --preset release -DPython3_EXECUTABLE=$(which python)
+        elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+          cmake --preset macos-release -DPython3_EXECUTABLE=$(which python)
+        else
+          cmake -B build -G "${{ matrix.generator }}" -A x64 -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DPython3_EXECUTABLE=$(which python)
+        fi
+      shell: bash
+
+    - name: Build
+      run: |
+        if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+          cmake --build --preset release
+        elif [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
+          cmake --build --preset release
+        elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+          cmake --build --preset macos-release
+        else
+          cmake --build build --config ${{ matrix.build_type }}
+        fi
+      shell: bash
+
+    - name: Test
+      run: |
+        if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+          ctest --test-dir build-gcc-release --output-on-failure
+        elif [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
+          ctest --test-dir build-gcc-release --output-on-failure
+        elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+          ctest --test-dir build-clang-release --output-on-failure
+        else
+          ctest --test-dir build --output-on-failure --build-config ${{ matrix.build_type }}
+        fi
+      shell: bash
+
+    - name: Install WiX Toolset
+      if: runner.os == 'Windows'
+      run: choco install wixtoolset --no-progress
+
+    - name: Package
+      run: |
+        if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+          cd build-gcc-release
+        elif [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
+          cd build-gcc-release
+        elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+          cd build-clang-release
+        else
+          cd build
+        fi
+        if [ "${{ matrix.os }}" = "windows-latest" ]; then
+          cpack -G WIX
+        elif [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+          cpack -G DEB
+          cpack -G RPM
+          cpack -G TGZ
+        elif [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
+          cpack -G DEB
+          cpack -G RPM
+          cpack -G TGZ
+        elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+          cpack -G TGZ
+        fi
+      shell: bash
+
+    - name: Upload native library artifact (linux-x64)
+      if: matrix.os == 'ubuntu-latest'
+      uses: actions/upload-artifact@v4
       with:
-        tag_name: ${{ github.event.inputs.tag }}
-        name: Release ${{ github.event.inputs.tag }}
-        draft: true
-        prerelease: false
-        generate_release_notes: true
-        files: |
-          artifacts/**/linux-x64-deb/*.deb
-          artifacts/**/linux-x64-rpm/*.rpm
-          artifacts/**/linux-x64-tar/*.tar.gz
-          artifacts/**/linux-arm64-deb/*.deb
-          artifacts/**/linux-arm64-rpm/*.rpm
-          artifacts/**/linux-arm64-tar/*.tar.gz
-          artifacts/**/macos-arm64-tar/*.tar.gz
-          artifacts/**/windows-x64-installer/*.msi
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        name: native-lib-linux-x64
+        path: bindings/python/omega_match/native/lib/libomega_match-linux-x64.so
+        retention-days: 30
+
+    - name: Upload native library artifact (linux-arm64)
+      if: matrix.os == 'ubuntu-24.04-arm'
+      uses: actions/upload-artifact@v4
+      with:
+        name: native-lib-linux-arm64
+        path: bindings/python/omega_match/native/lib/libomega_match-linux-arm64.so
+        retention-days: 30
+
+    - name: Upload native library artifact (windows-x64)
+      if: matrix.os == 'windows-latest'
+      uses: actions/upload-artifact@v4
+      with:
+        name: native-lib-windows-x64
+        path: bindings/python/omega_match/native/lib/libomega_match-windows-x64.dll
+        retention-days: 30
+
+    - name: Upload native library artifact (macos-arm64)
+      if: matrix.os == 'macos-latest'
+      uses: actions/upload-artifact@v4
+      with:
+        name: native-lib-macos-arm64
+        path: bindings/python/omega_match/native/lib/libomega_match-macos-arm64.dylib
+        retention-days: 30
+
+    - name: Upload DEB package
+      if: matrix.os == 'ubuntu-latest' || matrix.os == 'ubuntu-24.04-arm'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.os == 'ubuntu-latest' && 'linux-x64-deb' || 'linux-arm64-deb' }}
+        path: build-gcc-release/*.deb
+        retention-days: 30
+
+    - name: Upload RPM package
+      if: matrix.os == 'ubuntu-latest' || matrix.os == 'ubuntu-24.04-arm'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.os == 'ubuntu-latest' && 'linux-x64-rpm' || 'linux-arm64-rpm' }}
+        path: build-gcc-release/*.rpm
+        retention-days: 30
+
+    - name: Upload TGZ package
+      if: matrix.os == 'ubuntu-latest' || matrix.os == 'ubuntu-24.04-arm' || matrix.os == 'macos-latest'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.os == 'ubuntu-latest' && 'linux-x64-tar' || matrix.os == 'ubuntu-24.04-arm' && 'linux-arm64-tar' || 'macos-arm64-tar' }}
+        path: ${{ matrix.os == 'macos-latest' && 'build-clang-release/*.tar.gz' || 'build-gcc-release/*.tar.gz' }}
+        retention-days: 30
+
+    - name: Upload WIX installer
+      if: matrix.os == 'windows-latest'
+      uses: actions/upload-artifact@v4
+      with:
+        name: windows-x64-installer
+        path: build/*.msi
+        retention-days: 30
 
   build-universal-wheel:
+    needs: build-artifacts
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run && startsWith(github.event.workflow_run.ref, 'refs/tags/v'))
     steps:
       - uses: actions/checkout@v4
 
@@ -147,12 +274,11 @@ jobs:
         with:
           name: omega_match-universal-wheel
           path: bindings/python/dist/*.whl
-          retention-days: 7
+          retention-days: 30
 
   test-universal-wheel:
     needs: build-universal-wheel
     runs-on: ${{ matrix.os }}
-    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run && startsWith(github.event.workflow_run.ref, 'refs/tags/v'))
     strategy:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
@@ -179,3 +305,35 @@ jobs:
       - name: Run Python tests against installed wheel
         run: |
           pytest --pyargs omega_match
+
+  create-release:
+    needs: [build-artifacts, test-universal-wheel]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download all package artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts/
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+        name: Release ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+        draft: ${{ github.event_name == 'workflow_dispatch' }}
+        prerelease: false
+        generate_release_notes: true
+        files: |
+          artifacts/linux-x64-deb/*.deb
+          artifacts/linux-x64-rpm/*.rpm
+          artifacts/linux-x64-tar/*.tar.gz
+          artifacts/linux-arm64-deb/*.deb
+          artifacts/linux-arm64-rpm/*.rpm
+          artifacts/linux-arm64-tar/*.tar.gz
+          artifacts/macos-arm64-tar/*.tar.gz
+          artifacts/windows-x64-installer/*.msi
+          artifacts/omega_match-universal-wheel/*.whl
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
