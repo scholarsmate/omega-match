@@ -14,3 +14,7 @@ dist/
 perf_results.csv
 perf_results.png
 __pycache__/
+
+# Rust example ignores
+examples/rust/omega-match-rust/target
+examples/rust/omega-match-rust/Cargo.lock

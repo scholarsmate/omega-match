@@ -1,0 +1,10 @@
+[package]
+name = "omega-match-rust"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[build]
+rustflags = ["-C", "link-args=-Wl,-rpath,$ORIGIN/../../../build", "-L", "../../../build"]
+
+[dependencies]
