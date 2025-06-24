@@ -269,8 +269,14 @@ python olm.py match patterns.omg haystack.txt
 # Compile a pattern list
 python olm.py compile mypatterns.omg mypatterns.txt --ignore-case --elide-whitespace -v
 
-# Match patterns in a file
-python olm.py match mypatterns.omg input.txt --longest --no-overlap --threads 4 -v
+# Match patterns in a file, using 8 threads
+python olm.py match mypatterns.omg input.txt --longest --no-overlap --threads 8 -v
 ```
 
 The output will list each match as `offset:matched_text` (one per line, with Unix-style newlines).
+
+## License
+
+The OmegaMatch project is licensed under the [Apache License 2.0](LICENSE).
+
+OmegaMatch is not an official Apache Software Foundation (ASF) project.
