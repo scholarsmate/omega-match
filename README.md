@@ -344,7 +344,26 @@ The correct library is automatically selected based on the detected platform.
 
 ### Command-Line Tool (olm.py)
 
-The Python package includes `olm.py`, a command-line tool that mirrors the functionality of the native `olm` binary. This provides a pure Python interface for pattern compilation and matching operations.
+The Python package includes `olm.py`, a command-line tool that mirrors the functionality of the native `olm` binary. This tool provides a pure Python interface for pattern compilation and matching operations, making it easy to use OmegaMatch from the command line on any platform where Python is available.
+
+You can use `olm.py` to:
+- Compile large pattern lists into efficient matcher files for fast repeated searches.
+- Search for multiple patterns in large text or binary files, with support for advanced options like word boundaries, no-overlap, and multi-threading.
+- Integrate high-performance pattern matching into your data pipelines or automation scripts without writing any C code.
+
+#### Example
+
+Finding names from the King James version of the Bible:
+
+```powershell
+.\build-msvc-release\Release\olm.exe match --no-overlap --word-boundary --longest .\data\names.txt .\data\kjv.txt
+```
+
+You can also use the Python CLI version (works on all platforms):
+
+```bash
+python -m omega_match.olm match --no-overlap --word-boundary --longest data/names.txt data/kjv.txt
+```
 
 #### Usage
 
