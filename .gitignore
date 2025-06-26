@@ -14,3 +14,7 @@ dist/
 perf_results.csv
 perf_results.png
 __pycache__/
+
+
+target*
+*.lock
