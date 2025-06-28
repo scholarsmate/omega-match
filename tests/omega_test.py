@@ -121,6 +121,10 @@ class OmegaMatchTest(ABC):
             self.logger.info(f"Comparing output to {expected_file}")
             if not filecmp.cmp(output_file, expected_file):
                 self.logger.error("Output does not match expected output")
+                # Keep temporary output file for debugging
+                debug_output = output_file.with_suffix('.debug')
+                output_file.rename(debug_output)
+                self.logger.error(f"Output saved to {debug_output}")
                 sys.exit(1)
 
             self.logger.info("Test passed!")

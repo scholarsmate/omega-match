@@ -188,41 +188,66 @@ static uint64_t scan_bucket_and_append(
   uint64_t matches = 0;
   const uint32_t num_patterns = *(const uint32_t *)(bucket_ptr + 4);
   const uint8_t *pattern_ptr = bucket_ptr + 8;
+  const uint8_t *hay_pos = haystack + pos;
+  const size_t remaining = haystack_size - pos;
+  
+  // Pre-compute word boundary checks for position
+  const bool pos_at_word_start = !word_prefix || (pos == 0 || !IS_WORD(haystack[pos - 1]));
+  const bool pos_at_line_start = !line_start || is_at_line_start(haystack, pos);
+  
   for (uint32_t j = 0; j < num_patterns; ++j) {
     const pattern_t *pat = (const pattern_t *)pattern_ptr;
     const uint32_t len = pat->len;
-    if (unlikely(pos + len > haystack_size)) {
+    
+    // Early exit if pattern doesn't fit
+    if (unlikely(len > remaining)) {
       pattern_ptr += sizeof(pattern_t);
       continue;
     }
+    
     const size_t offset = pat->offset;
     pattern_ptr += sizeof(pattern_t);
     ++(*compares);
-    if (memcmp(haystack + pos, pat_store + offset, len) != 0) {
+    
+    // Optimized comparison: check first/last bytes before full memcmp
+    const uint8_t *pattern_data = pat_store + offset;
+    
+    // Fast path for single character patterns
+    if (len == 1) {
+      if (hay_pos[0] != pattern_data[0]) continue;
+    } else {
+      // Multi-character pattern: check first and last bytes first
+      if (hay_pos[0] != pattern_data[0] || hay_pos[len-1] != pattern_data[len-1]) {
+        continue;
+      }
+      // Only do memcmp if length > 2 and first/last bytes match
+      if (len > 2 && memcmp(hay_pos + 1, pattern_data + 1, len - 2) != 0) {
+        continue;
+      }
+    }
+    
+    // Pattern matches, now check filters
+    const size_t match_end = pos + len;
+    
+    // Word boundary checks (optimized with pre-computed values)
+    if (word_boundary && match_end < haystack_size && IS_WORD(haystack[match_end])) {
       continue;
     }
-    // Word boundary check (end of match)
-    if (word_boundary &&
-        (pos + len < haystack_size && IS_WORD(haystack[pos + len]))) {
+    if (!pos_at_word_start) {
       continue;
     }
-    // Word prefix check (start of match)
-    if (word_prefix && !(pos == 0 || !IS_WORD(haystack[pos - 1]))) {
+    if (word_suffix && match_end < haystack_size && IS_WORD(haystack[match_end])) {
       continue;
     }
-    // Word suffix check (end of match)
-    if (word_suffix &&
-        !(pos + len == haystack_size || !IS_WORD(haystack[pos + len]))) {
+    
+    // Line checks
+    if (!pos_at_line_start) {
       continue;
     }
-    // Line start check (beginning of match)
-    if (line_start && !is_at_line_start(haystack, pos)) {
-      continue;
-    }
-    // Line end check (end of match)
     if (line_end && !is_at_line_end(haystack, haystack_size, pos, len)) {
       continue;
     }
+    
     append_match(local, &(omega_match_result_t){pos, len, haystack + pos});
     ++matches;
   }
@@ -236,13 +261,11 @@ static uint64_t scan_bucket_and_append(
 static void radix_sort_matches(const match_vector_t *restrict mv) {
   const size_t n = mv->count;
   if (unlikely(n < 2)) {
-    /* nothing to sort */
-    return;
+    return; // nothing to sort
   }
 
   omega_match_result_t *tmp = malloc(n * sizeof(omega_match_result_t));
-  uint8_t *keys = malloc(n * sizeof(uint8_t)); // cache per-pass key bytes
-  if (unlikely(!tmp || !keys)) {
+  if (unlikely(!tmp)) {
     ABORT("malloc for radix sort");
   }
 
@@ -252,16 +275,17 @@ static void radix_sort_matches(const match_vector_t *restrict mv) {
   for (int pass = 0; pass < PASSES; ++pass) {
     size_t count[256] = {0};
 
-    /* 1. compute and histogram key bytes */
+    /* 1. count occurrences of each byte value */
     for (size_t i = 0; i < n; ++i) {
+      uint8_t key;
       if (pass < 4) {
         // First 4 passes: sort by ~len (descending match length)
-        keys[i] = (uint8_t)(~in[i].len >> (pass << 3) & 0xFFu);
+        key = (uint8_t)(~in[i].len >> (pass << 3) & 0xFFu);
       } else {
         // Remaining passes: sort by offset (ascending match position)
-        keys[i] = (uint8_t)(in[i].offset >> ((pass - 4) << 3) & 0xFFu);
+        key = (uint8_t)(in[i].offset >> ((pass - 4) << 3) & 0xFFu);
       }
-      ++count[keys[i]];
+      ++count[key];
     }
 
     /* 2. exclusive prefix sum */
@@ -272,9 +296,17 @@ static void radix_sort_matches(const match_vector_t *restrict mv) {
       sum += c;
     }
 
-    /* 3. scatter using cached key bytes */
+    /* 3. scatter */
     for (size_t i = 0; i < n; ++i) {
-      out[count[keys[i]]++] = in[i];
+      uint8_t key;
+      if (pass < 4) {
+        // First 4 passes: sort by ~len (descending match length)
+        key = (uint8_t)(~in[i].len >> (pass << 3) & 0xFFu);
+      } else {
+        // Remaining passes: sort by offset (ascending match position)
+        key = (uint8_t)(in[i].offset >> ((pass - 4) << 3) & 0xFFu);
+      }
+      out[count[key]++] = in[i];
     }
 
     /* 4. swap roles */
@@ -283,7 +315,12 @@ static void radix_sort_matches(const match_vector_t *restrict mv) {
     out = tmp_ptr;
   }
 
-  free(keys);
+  // Copy results back to original buffer if needed
+  const int passes = PASSES;
+  if (passes % 2 == 1) {
+    memcpy(mv->data, tmp, n * sizeof(omega_match_result_t));
+  }
+
   free(tmp);
 }
 
@@ -585,59 +622,78 @@ finalize_match_results(match_vector_t **restrict thread_matches,
   return out;
 }
 
-static OLM_ALWAYS_INLINE int binary_search_uint32(const uint32_t *restrict arr,
-                                                  const uint32_t count,
-                                                  const uint32_t key) {
-  int lo = 0, hi = (int)count - 1;
-  while (lo <= hi) {
-    const int mid = lo + ((hi - lo) >> 1);
+static OLM_ALWAYS_INLINE int binary_search_uint32_optimized(
+    const uint32_t *restrict arr, const uint32_t count, const uint32_t key) {
+  // Early exit for small arrays
+  // If the array is empty, there is no match.
+  if (unlikely(count == 0)) return 0;
+  
+  // If the array has only one element, directly compare it to the key.
+  if (unlikely(count == 1)) return arr[0] == key;
+  
+  // Fast path for very small arrays (2-4 elements)
+  // For arrays with 2-4 elements, use bitwise OR to check all elements in a single pass.
+  // This avoids the overhead of a loop and improves performance for small arrays.
+  if (count <= 4) {
+    if (count == 2) {
+      return (arr[0] == key) | (arr[1] == key);
+    }
+    if (count == 3) {
+      return (arr[0] == key) | (arr[1] == key) | (arr[2] == key);
+    }
+    // count == 4
+    return (arr[0] == key) | (arr[1] == key) | (arr[2] == key) | (arr[3] == key);
+  }
+  
+  // Binary search with fewer branches for larger arrays
+  uint32_t lo = 0, hi = count;
+  while (lo < hi) {
+    const uint32_t mid = lo + ((hi - lo) >> 1);
     const uint32_t val = arr[mid];
     if (key < val) {
-      hi = mid - 1;
+      hi = mid;
     } else if (key > val) {
       lo = mid + 1;
     } else {
-      // Found
-      return 1;
+      return 1; // Found
     }
   }
   return 0;
 }
 
+// Optimized short matcher queries with better branch prediction
 static OLM_ALWAYS_INLINE int
-short_matcher_query1(const short_matcher_t *restrict sm, const uint8_t b) {
+short_matcher_query1_fast(const short_matcher_t *restrict sm, const uint8_t b) {
   return sm->bitmap1[b >> 3] & (1 << (b & 7));
 }
 
 static OLM_ALWAYS_INLINE int
-short_matcher_query2(const short_matcher_t *restrict sm,
-                     const uint8_t *restrict ptr) {
+short_matcher_query2_fast(const short_matcher_t *restrict sm,
+                         const uint8_t *restrict ptr) {
   const uint16_t v = ((uint16_t)ptr[0] << 8) | ptr[1];
   return sm->bitmap2[v >> 3] & (1 << (v & 7));
 }
 
 static OLM_ALWAYS_INLINE int
-short_matcher_query3(const short_matcher_t *restrict sm,
-                     const uint8_t *restrict ptr) {
-  if (sm->len3 == 0 || sm->arr3 == NULL) {
-    return 0;
-  }
-  const uint32_t key =
-      ((uint32_t)ptr[0] << 16) | ((uint32_t)ptr[1] << 8) | ptr[2];
-  return binary_search_uint32(sm->arr3, sm->len3, key);
+short_matcher_query3_fast(const short_matcher_t *restrict sm,
+                         const uint8_t *restrict ptr) {
+  if (unlikely(sm->len3 == 0)) return 0;
+  const uint32_t key = ((uint32_t)ptr[0] << 16) | ((uint32_t)ptr[1] << 8) | ptr[2];
+  return binary_search_uint32_optimized(sm->arr3, sm->len3, key);
 }
 
-static OLM_ALWAYS_INLINE int short_matcher_query4(const short_matcher_t *sm,
-                                                  const uint8_t *ptr) {
-  if (sm->len4 == 0 || sm->arr4 == NULL) {
-    return 0;
-  }
+static OLM_ALWAYS_INLINE int
+short_matcher_query4_fast(const short_matcher_t *restrict sm,
+                         const uint8_t *restrict ptr) {
+  if (unlikely(sm->len4 == 0)) return 0;
   const uint32_t key = ((uint32_t)ptr[0] << 24) | ((uint32_t)ptr[1] << 16) |
                        ((uint32_t)ptr[2] << 8) | ptr[3];
-  return binary_search_uint32(sm->arr4, sm->len4, key);
+  return binary_search_uint32_optimized(sm->arr4, sm->len4, key);
 }
 
-// Core case-sensitive matcher
+
+
+// Core case-sensitive matcher with performance optimizations
 static omega_match_results_t *
 core_match(const omega_list_matcher_t *restrict matcher,
            const uint8_t *restrict haystack, const size_t haystack_size,
@@ -672,13 +728,13 @@ core_match(const omega_list_matcher_t *restrict matcher,
     ABORT("calloc thread_matches"); // OOM
   }
 
-  // Hoist matcher fields
+  // Hoist matcher fields and create local copies to improve cache locality
   const uint32_t table_mask = matcher->header->table_size - 1;
-  const uint32_t *idx_arr = matcher->index_array;
-  const uint8_t *bucket = matcher->bucket_data;
-  const uint8_t *pat_st = matcher->pattern_store;
-  const bloom_filter_t *bf = &matcher->bf;
-  const short_matcher_t *sm = &matcher->short_matcher;
+  const uint32_t *restrict idx_arr = matcher->index_array;
+  const uint8_t *restrict bucket = matcher->bucket_data;
+  const uint8_t *restrict pat_st = matcher->pattern_store;
+  const bloom_filter_t *restrict bf = &matcher->bf;
+  const short_matcher_t *restrict sm = &matcher->short_matcher;
   const uint32_t smallest = matcher->header->smallest_pattern_length;
   const uint32_t largest = matcher->header->largest_pattern_length;
 
@@ -709,20 +765,26 @@ core_match(const omega_list_matcher_t *restrict matcher,
 #pragma omp for schedule(runtime)
 #endif
     for (pos = 0; pos < hsize; ++pos) {
-      // Word boundary logic (only for scan start, not for prefix/suffix)
-      if (word_boundary && IS_WORD(haystack[pos]) ==
-                               (pos > 0 ? IS_WORD(haystack[pos - 1]) : 0)) {
-        continue;
+      // Word boundary optimization: skip non-boundary positions early
+      const uint8_t curr_char = haystack[pos];
+      if (word_boundary) {
+        const bool curr_is_word = IS_WORD(curr_char);
+        const bool prev_is_word = (pos > 0) ? IS_WORD(haystack[pos - 1]) : false;
+        if (curr_is_word == prev_is_word) {
+          continue;
+        }
       }
 
-      const uint8_t *h_ptr = haystack + pos;
+      const uint8_t *restrict h_ptr = haystack + pos;
+      const size_t remaining = hsize - pos;
 
-      // Hash table for patterns ≥ 5
-      if (largest >= 5 && pos + 4 <= hsize) {
+      // Hash table for patterns ≥ 5 with optimized bloom filter check
+      if (largest >= 5 && remaining >= 4) {
         ++total_attempts;
         const uint32_t cand = pack_gram(h_ptr);
-        OLM_PREFETCH(&bf->bits[(cand >> 6) & ((bf->bit_size / 64) - 1)]);
-        if (!bloom_filter_query(bf, cand)) {
+        
+        // Use the official bloom filter check which implements 3-hash bloom filter
+        if (unlikely(!bloom_filter_query(bf, cand))) {
           ++total_filtered;
         } else {
           uint32_t slot_offset;
@@ -738,72 +800,77 @@ core_match(const omega_list_matcher_t *restrict matcher,
         }
       }
 
-      // Short matcher for patterns of length 1–4
+      // Short matcher for patterns of length 1–4 with optimizations
       if (use_sm) {
-        if (use_sm4 && pos + 4 <= hsize && short_matcher_query4(sm, h_ptr)) {
-          int prefix_ok =
-              !word_prefix || (pos == 0 || !IS_WORD(haystack[pos - 1]));
-          int suffix_ok =
-              !word_suffix || (pos + 4 == hsize || !IS_WORD(haystack[pos + 4]));
-          int line_start_ok = !line_start || is_at_line_start(haystack, pos);
-          int line_end_ok =
-              !line_end || is_at_line_end(haystack, (size_t)hsize, pos, 4);
-          if ((!word_boundary ||
-               (pos + 4 >= hsize || !IS_WORD(haystack[pos + 4]))) &&
-              prefix_ok && suffix_ok && line_start_ok && line_end_ok) {
-            ++total_hits;
-            append_match(local, &(omega_match_result_t){
-                                    .offset = pos, .len = 4, .match = h_ptr});
-          } else {
-            ++total_misses;
+        // Pre-compute common boundary checks for this position
+        const bool word_prefix_ok = !word_prefix || (pos == 0 || !IS_WORD(haystack[pos - 1]));
+        const bool line_start_ok = !line_start || is_at_line_start(haystack, pos);
+        
+        // Check length 4 patterns first (most selective) - better cache utilization
+        if (use_sm4 && remaining >= 4) {
+          if (short_matcher_query4_fast(sm, h_ptr)) {
+            const bool word_boundary_ok = !word_boundary || !IS_WORD(haystack[pos + 4]);
+            const bool word_suffix_ok = !word_suffix || (pos + 4 >= hsize || !IS_WORD(haystack[pos + 4]));
+            const bool line_end_ok = !line_end || is_at_line_end(haystack, (size_t)hsize, pos, 4);
+            
+            if (word_boundary_ok && word_prefix_ok && word_suffix_ok && 
+                      line_start_ok && line_end_ok) {
+              ++total_hits;
+              append_match(local, &(omega_match_result_t){
+                                      .offset = pos, .len = 4, .match = h_ptr});
+            } else {
+              ++total_misses;
+            }
           }
         }
-        if (use_sm3 && pos + 3 <= hsize && short_matcher_query3(sm, h_ptr)) {
-          int prefix_ok =
-              !word_prefix || (pos == 0 || !IS_WORD(haystack[pos - 1]));
-          int suffix_ok =
-              !word_suffix || (pos + 3 == hsize || !IS_WORD(haystack[pos + 3]));
-          int line_start_ok = !line_start || is_at_line_start(haystack, pos);
-          int line_end_ok =
-              !line_end || is_at_line_end(haystack, (size_t)hsize, pos, 3);
-          if ((!word_boundary ||
-               (pos + 3 >= hsize || !IS_WORD(haystack[pos + 3]))) &&
-              prefix_ok && suffix_ok && line_start_ok && line_end_ok) {
-            ++total_hits;
-            append_match(local, &(omega_match_result_t){
-                                    .offset = pos, .len = 3, .match = h_ptr});
-          } else {
-            ++total_misses;
+        
+        // Check length 3 patterns
+        if (use_sm3 && remaining >= 3) {
+          if (short_matcher_query3_fast(sm, h_ptr)) {
+            const bool word_boundary_ok = !word_boundary || !IS_WORD(haystack[pos + 3]);
+            const bool word_suffix_ok = !word_suffix || (pos + 3 >= hsize || !IS_WORD(haystack[pos + 3]));
+            const bool line_end_ok = !line_end || is_at_line_end(haystack, (size_t)hsize, pos, 3);
+            
+            if (word_boundary_ok && word_prefix_ok && word_suffix_ok && 
+                      line_start_ok && line_end_ok) {
+              ++total_hits;
+              append_match(local, &(omega_match_result_t){
+                                      .offset = pos, .len = 3, .match = h_ptr});
+            } else {
+              ++total_misses;
+            }
           }
         }
-        if (use_sm2 && pos + 2 <= hsize && short_matcher_query2(sm, h_ptr)) {
-          int prefix_ok =
-              !word_prefix || (pos == 0 || !IS_WORD(haystack[pos - 1]));
-          int suffix_ok =
-              !word_suffix || (pos + 2 == hsize || !IS_WORD(haystack[pos + 2]));
-          if ((!word_boundary ||
-               (pos + 2 >= hsize || !IS_WORD(haystack[pos + 2]))) &&
-              prefix_ok && suffix_ok) {
-            ++total_hits;
-            append_match(local, &(omega_match_result_t){
-                                    .offset = pos, .len = 2, .match = h_ptr});
-          } else {
-            ++total_misses;
+        
+        // Check length 2 patterns (bitmap check is fast)
+        if (use_sm2 && remaining >= 2) {
+          if (short_matcher_query2_fast(sm, h_ptr)) {
+            const bool word_boundary_ok = !word_boundary || !IS_WORD(haystack[pos + 2]);
+            const bool word_suffix_ok = !word_suffix || (pos + 2 >= hsize || !IS_WORD(haystack[pos + 2]));
+            
+            if (word_boundary_ok && word_prefix_ok && word_suffix_ok) {
+              ++total_hits;
+              append_match(local, &(omega_match_result_t){
+                                      .offset = pos, .len = 2, .match = h_ptr});
+            } else {
+              ++total_misses;
+            }
           }
         }
-        if (use_sm1 && short_matcher_query1(sm, *h_ptr)) {
-          int prefix_ok =
-              !word_prefix || (pos == 0 || !IS_WORD(haystack[pos - 1]));
-          int suffix_ok =
-              !word_suffix || (pos + 1 == hsize || !IS_WORD(haystack[pos + 1]));
-          if ((!word_boundary ||
-               (pos + 1 >= hsize || !IS_WORD(haystack[pos + 1]))) &&
-              prefix_ok && suffix_ok) {
-            ++total_hits;
-            append_match(local, &(omega_match_result_t){
-                                    .offset = pos, .len = 1, .match = h_ptr});
-          } else {
-            ++total_misses;
+        
+        // Check length 1 patterns (bitmap check is fastest)
+        if (use_sm1) {
+          if (short_matcher_query1_fast(sm, *h_ptr)) {
+            const bool word_boundary_ok = !word_boundary || (pos + 1 >= hsize || !IS_WORD(haystack[pos + 1]));
+            const bool word_suffix_ok = !word_suffix || (pos + 1 >= hsize || !IS_WORD(haystack[pos + 1]));
+            
+            if (word_boundary_ok && word_prefix_ok && word_suffix_ok) {
+              ++total_hits;
+              append_match(local, &(omega_match_result_t){
+                                      .offset = pos, .len = 1, .match = h_ptr});
+            } else {
+              ++total_misses;
+            }
           }
         }
       }

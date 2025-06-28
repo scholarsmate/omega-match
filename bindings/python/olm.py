@@ -7,7 +7,7 @@ import io
 import os
 import sys
 
-from omega_match.omega_match import Compiler, Matcher
+from omega_match import Compiler, Matcher, get_library_info, get_version
 
 # Force stdout to use Unix-style line endings explicitly on Windows
 if os.name == "nt":
@@ -83,7 +83,8 @@ def match_mode(
             word_prefix=word_prefix,
             word_suffix=word_suffix,
             line_start=line_start,
-            line_end=line_end,)
+            line_end=line_end,
+        )
 
         if verbose:
             stats = matcher.get_match_stats()
@@ -100,6 +101,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Pattern matching tool")
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose output"
+    )
+    parser.add_argument(
+        "-V", "--version", action="version", version=f"v{get_version()} / Library Info: {get_library_info()}",
+        help="Show version information"
     )
 
     subparsers = parser.add_subparsers(
@@ -170,6 +175,7 @@ def main() -> None:
     # Try to enable argcomplete (if available)
     try:
         import argcomplete
+
         argcomplete.autocomplete(parser)
     except ImportError:
         pass

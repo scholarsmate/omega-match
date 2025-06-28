@@ -134,7 +134,7 @@ static void print_results_buffered_fd(const omega_match_results_t *results,
 
 // General help
 static void usage(const char *prog) {
-  fprintf(stderr, "Usage: %s [-h, --help] [-v, --verbose] <command> [<args>]\n",
+  fprintf(stderr, "Usage: %s [-h, --help] [-v, --verbose] [--version] <command> [<args>]\n",
           prog);
   fprintf(stderr, "\n");
   fprintf(stderr, "Commands:\n");
@@ -218,6 +218,12 @@ int main(const int argc, char *argv[]) {
   // Global help
   if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
     usage(argv[0]);
+    return EXIT_SUCCESS;
+  }
+
+  // Global version
+  if (strcmp(argv[1], "--version") == 0) {
+    fprintf(stderr, "Version: %s\n", omega_match_version());
     return EXIT_SUCCESS;
   }
 

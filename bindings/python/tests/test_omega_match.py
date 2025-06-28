@@ -2,7 +2,13 @@
 
 import pytest
 
-from omega_match.omega_match import Compiler, Matcher, MatchStats, PatternStoreStats, get_version
+from omega_match.omega_match import (
+    Compiler,
+    Matcher,
+    MatchStats,
+    PatternStoreStats,
+    get_version,
+)
 
 
 def write_file(path, lines):
@@ -15,7 +21,6 @@ def test_get_version():
     assert len(version) > 0
     assert version.count(".") == 2
     assert version.replace(".", "").isdigit()
- 
 
 
 def test_compiler_add_patterns(tmp_path):
@@ -199,7 +204,7 @@ def test_set_threads(tmp_path):
         # OpenMP on some platforms (especially macOS) can be restrictive
         thread_counts_to_try = [2, 1, 4]
         success = False
-        
+
         for threads in thread_counts_to_try:
             try:
                 m.set_threads(threads)
@@ -209,10 +214,10 @@ def test_set_threads(tmp_path):
             except ValueError:
                 # This thread count didn't work, try the next one
                 continue
-        
+
         if not success:
             pytest.skip("OpenMP thread setting not supported on this platform")
-        
+
         m.set_chunk_size(1024)
         assert m.get_chunk_size() == 1024
 
@@ -269,11 +274,11 @@ def test_line_start_and_end(tmp_path):
     patterns = ["start", "end", "middle"]
     pat_file = tmp_path / "line_patterns.txt"
     write_file(pat_file, patterns)
-    
+
     with Matcher(str(pat_file)) as m:
         # Test data with patterns at different line positions
         hay = b"start of line\nmiddle start here\nsome middle text\nline end"
-        
+
         # Test line_start matching - should only match patterns at start of lines
         results = m.match(hay, line_start=True)
         offsets = [r.offset for r in results]
@@ -282,7 +287,7 @@ def test_line_start_and_end(tmp_path):
         # "middle" at offset 14 (start of second line, after newline at 13)
         assert offsets == [0, 14]
         assert matches == [b"start", b"middle"]
-        
+
         # Test line_end matching - should only match patterns at end of lines
         results = m.match(hay, line_end=True)
         offsets = [r.offset for r in results]
@@ -290,7 +295,7 @@ def test_line_start_and_end(tmp_path):
         # "end" at offset 54 (end of last line)
         assert offsets == [54]
         assert matches == [b"end"]
-          # Test both line_start and line_end together
+        # Test both line_start and line_end together
         results = m.match(hay, line_start=True, line_end=True)
         offsets = [r.offset for r in results]
         matches = [r.match for r in results]
