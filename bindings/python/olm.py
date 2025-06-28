@@ -83,7 +83,8 @@ def match_mode(
             word_prefix=word_prefix,
             word_suffix=word_suffix,
             line_start=line_start,
-            line_end=line_end,)
+            line_end=line_end,
+        )
 
         if verbose:
             stats = matcher.get_match_stats()
@@ -170,6 +171,7 @@ def main() -> None:
     # Try to enable argcomplete (if available)
     try:
         import argcomplete
+
         argcomplete.autocomplete(parser)
     except ImportError:
         pass

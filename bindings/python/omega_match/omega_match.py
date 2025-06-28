@@ -1,12 +1,13 @@
 # omega_match.py
 
 import atexit
+import os
 import platform
 import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Literal, Optional, Protocol
+from typing import List, Literal, Optional, Protocol, Tuple, Dict
 
 from cffi import FFI
 
@@ -287,6 +288,9 @@ const char *omega_match_version(void);
 # C library FFI handle
 C = None
 
+# Global variable to store library information for get_library_info()
+_library_info: Optional[Dict[str, str]] = None
+
 
 @dataclass
 class PatternStoreStats:
@@ -318,13 +322,8 @@ class MatchResult:
         return len(self.match)
 
 
-def _load_library():
-    import os
-
-    override = os.getenv("OMEGA_MATCH_LIB_PATH")
-    if override:
-        return ffi.dlopen(override)
-
+def _detect_platform():
+    """Detect platform and architecture information."""
     system = sys.platform
     arch = platform.machine().lower()
 
@@ -334,29 +333,109 @@ def _load_library():
         arch = "arm64"
     else:
         raise RuntimeError(f"Unsupported architecture: {arch}")
-    
-    # Determine the path to the native library
-    #
-    # Expects the following native libraries to be present:
-    #   linux:   libomega_match-linux-x64.so, libomega_match-linux-arm64.so
-    #   windows: libomega_match-windows-x64.dll, libomega_match-windows-arm64.dll
-    #   macOS:   libomega_match-macos-x64.dylib, libomega_match-macos-arm64.dylib
-    #
-    # Note: Currently only x64 is provided for Windows and only arm64 for macOS.
+
+    return system, arch
+
+
+def _get_available_pgo_variants(system: str, arch: str) -> List[Tuple[str, str, str]]:
+    """Get available PGO variants in priority order (best first)."""
+    variants = []
+
+    if system.startswith("linux") and arch == "x64":
+        # Linux x64: Prefer Clang PGO > GCC PGO > Standard
+        variants = [
+            (
+                "libomega_match-linux-x64-clang-pgo.so",
+                "linux-x64-clang-pgo",
+                "PGO (Clang)",
+            ),
+            ("libomega_match-linux-x64-gcc-pgo.so", "linux-x64-gcc-pgo", "PGO (GCC)"),
+            ("libomega_match-linux-x64.so", "linux-x64", "Standard"),
+        ]
+    elif system.startswith("linux") and arch == "arm64":
+        # Linux ARM64: Only standard build available currently
+        variants = [
+            ("libomega_match-linux-arm64.so", "linux-arm64", "Standard"),
+        ]
+    elif system in {"win32", "cygwin"} and arch == "x64":
+        # Windows x64: Prefer MSVC PGO > Standard
+        variants = [
+            (
+                "libomega_match-windows-x64-msvc-pgo.dll",
+                "windows-x64-msvc-pgo",
+                "PGO (MSVC)",
+            ),
+            ("libomega_match-windows-x64.dll", "windows-x64", "Standard"),
+        ]
+    elif system == "darwin" and arch == "arm64":
+        # macOS ARM64: Only standard build available currently
+        variants = [
+            ("libomega_match-macos-arm64.dylib", "macos-arm64", "Standard"),
+        ]
+    elif system == "darwin" and arch == "x64":
+        # macOS x64: Not currently provided
+        variants = []
+
+    return variants
+
+
+def _find_best_library_variant(lib_dir_path: Path) -> Tuple[Path, str, str]:
+    """Find the best available library variant."""
+
+    system, arch = _detect_platform()
+    variants = _get_available_pgo_variants(system, arch)
+
+    if not variants:
+        raise RuntimeError(
+            f"No library variants available for platform: {system}-{arch}"
+        )
+
+    # Try variants in priority order
+    for filename, variant_id, optimization in variants:
+        lib_path = lib_dir_path / filename
+        if lib_path.is_file():
+            return lib_path, variant_id, optimization
+
+    # If no variants found, provide helpful error message
+    available_files = [f.name for f in lib_dir_path.glob("libomega_match-*")]
+    raise RuntimeError(
+        f"No compatible native library found for {system}-{arch}.\n"
+        f"Looking for: {', '.join(v[0] for v in variants)}\n"
+        f"Available files: {', '.join(available_files) if available_files else 'None'}\n"
+        f"Library directory: {lib_dir_path}"
+    )
+
+
+def _load_library():
+    override = os.getenv("OMEGA_MATCH_LIB_PATH")
+    if override:
+        # Store library info for override path
+        global _library_info
+        _library_info = {
+            "path": override,
+            "variant": "custom-override",
+            "optimization": "Unknown",
+            "platform": f"{sys.platform}-{platform.machine().lower()}",
+        }
+        return ffi.dlopen(override)
 
     lib_dir_path = Path(os.path.dirname(__file__)) / "native" / "lib"
-    if system.startswith("linux"):
-        lib_path = lib_dir_path / f"libomega_match-linux-{arch}.so"
-    elif system in {"win32", "cygwin"}:
-        os.add_dll_directory(os.path.dirname(lib_dir_path))
-        lib_path = lib_dir_path / f"libomega_match-windows-{arch}.dll"
-    elif system == "darwin":
-        lib_path = lib_dir_path / f"libomega_match-macos-{arch}.dylib"
-    else:
-        raise RuntimeError(f"Unsupported platform: {system}")
 
-    if not lib_path.is_file():
-        raise RuntimeError(f"Native library not found: {lib_path}")
+    # Find the best available library variant
+    lib_path, variant_id, optimization = _find_best_library_variant(lib_dir_path)
+
+    # Store library info for get_library_info()
+    _library_info = {
+        "path": str(lib_path),
+        "variant": variant_id,
+        "optimization": optimization,
+        "platform": f"{sys.platform}-{platform.machine().lower()}",
+    }
+
+    # Platform-specific loading
+    system, _arch = _detect_platform()
+    if system in {"win32", "cygwin"}:
+        os.add_dll_directory(os.path.dirname(lib_dir_path))
 
     return ffi.dlopen(str(lib_path))
 
@@ -378,6 +457,33 @@ def get_version() -> str:
     return ffi.string(version).decode("utf-8")
 
 
+def get_library_info() -> Dict[str, str]:
+    """Get information about the loaded native library variant.
+
+    Returns:
+        Dictionary containing:
+        - path: Full path to the loaded library file
+        - variant: Variant identifier (e.g., 'linux-x64-clang-pgo')
+        - optimization: Optimization level (e.g., 'PGO (Clang)', 'Standard')
+        - platform: Platform string (e.g., 'linux-x64')
+    """
+    global _library_info
+
+    if _library_info is None:
+        # Force library loading to populate _library_info
+        _get_library()
+
+    if _library_info is None:
+        return {
+            "path": "unknown",
+            "variant": "unknown",
+            "optimization": "unknown",
+            "platform": "unknown",
+        }
+
+    return _library_info.copy()
+
+
 class Compiler:
     def __init__(
         self,
@@ -395,7 +501,7 @@ class Compiler:
                 "Make sure the correct native library is present and loaded."
             )
         try:
-            self._compiler: "ffi.CData" = lib.omega_list_matcher_compiler_create(
+            self._compiler = lib.omega_list_matcher_compiler_create(
                 compiled_file.encode("utf-8"),
                 int(case_insensitive),
                 int(ignore_punctuation),
@@ -408,7 +514,7 @@ class Compiler:
             ) from e
         if self._compiler == ffi.NULL:
             raise RuntimeError("Failed to create compiler")
-        
+
         register_compiler(self)
 
     def __enter__(self):
@@ -416,9 +522,9 @@ class Compiler:
 
     def __exit__(
         self,
-        exc_type: Optional[type[BaseException]],
-        exc_val: Optional[BaseException],
-        exc_tb: Optional[BaseException],
+        _exc_type: Optional[type[BaseException]],
+        _exc_val: Optional[BaseException],
+        _exc_tb: Optional[BaseException],
     ) -> None:
         self.destroy()
 
@@ -531,13 +637,18 @@ class Matcher:
         self._match_stats = ffi.new("omega_match_stats_t*")
         if lib.omega_list_matcher_add_stats(self._matcher, self._match_stats) != 0:
             raise RuntimeError("Failed to attach stats to matcher")
-        
+
         register_matcher(self)
 
     def __enter__(self):
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        _exc_type: Optional[type[BaseException]],
+        _exc_val: Optional[BaseException],
+        _exc_tb: Optional[BaseException],
+    ) -> None:
         self.destroy()
 
     def __del__(self):
@@ -619,6 +730,7 @@ _destroy_lock = threading.Lock()
 
 class Destroyable(Protocol):
     def destroy(self) -> None: ...
+
 
 def _safe_destroy(obj: Destroyable, name: str):
     with _destroy_lock:
