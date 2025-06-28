@@ -97,6 +97,82 @@
         "OpenMP_CXX_LIB_NAMES": "omp",
         "OpenMP_omp_LIBRARY": "/opt/homebrew/opt/libomp/lib/libomp.dylib"
       }
+    },
+    {
+      "name": "gcc-pgo-generate",
+      "displayName": "GCC PGO Instrumentation (WSL)",
+      "generator": "Ninja",
+      "binaryDir": "build-gcc-pgo-generate",
+      "description": "GCC Release build with PGO instrumentation for training",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "gcc",
+        "ENABLE_PGO_GENERATE": "ON"
+      }
+    },
+    {
+      "name": "gcc-pgo-use",
+      "displayName": "GCC PGO Optimized (WSL)",
+      "generator": "Ninja",
+      "binaryDir": "build-gcc-pgo-use",
+      "description": "GCC Release build using PGO profiles for optimization",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "gcc",
+        "ENABLE_PGO_USE": "ON"
+      }
+    },
+    {
+      "name": "clang-pgo-generate",
+      "displayName": "Clang PGO Instrumentation (WSL)",
+      "generator": "Ninja",
+      "binaryDir": "build-clang-pgo-generate",
+      "description": "Clang Release build with PGO instrumentation for training",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "clang",
+        "ENABLE_PGO_GENERATE": "ON"
+      }
+    },
+    {
+      "name": "clang-pgo-use",
+      "displayName": "Clang PGO Optimized (WSL)",
+      "generator": "Ninja",
+      "binaryDir": "build-clang-pgo-use",
+      "description": "Clang Release build using PGO profiles for optimization",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "clang",
+        "ENABLE_PGO_USE": "ON"
+      }
+    },
+    {
+      "name": "msvc-pgo-generate",
+      "displayName": "MSVC PGO Instrumentation (Windows)",
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "build-msvc-pgo-generate",
+      "description": "MSVC Release build with PGO instrumentation for training",
+      "architecture": {
+        "value": "x64"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "ENABLE_PGO_GENERATE": "ON"
+      }
+    },
+    {
+      "name": "msvc-pgo-use",
+      "displayName": "MSVC PGO Optimized (Windows)",
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "build-msvc-pgo-use",
+      "description": "MSVC Release build using PGO profiles for optimization",
+      "architecture": {
+        "value": "x64"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "ENABLE_PGO_USE": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -136,6 +212,44 @@
       "name": "macos-debug",
       "configurePreset": "macos-debug",
       "description": "Build with Clang and libomp on macOS in Debug mode",
+      "jobs": 0
+    },
+    {
+      "name": "gcc-pgo-generate",
+      "configurePreset": "gcc-pgo-generate",
+      "description": "Build GCC instrumented version for PGO training",
+      "jobs": 0
+    },
+    {
+      "name": "gcc-pgo-use",
+      "configurePreset": "gcc-pgo-use",
+      "description": "Build GCC optimized version using PGO profiles",
+      "jobs": 0
+    },
+    {
+      "name": "clang-pgo-generate",
+      "configurePreset": "clang-pgo-generate",
+      "description": "Build Clang instrumented version for PGO training",
+      "jobs": 0
+    },
+    {
+      "name": "clang-pgo-use",
+      "configurePreset": "clang-pgo-use",
+      "description": "Build Clang optimized version using PGO profiles",
+      "jobs": 0
+    },
+    {
+      "name": "msvc-pgo-generate",
+      "configurePreset": "msvc-pgo-generate",
+      "description": "Build MSVC instrumented version for PGO training",
+      "configuration": "Release",
+      "jobs": 0
+    },
+    {
+      "name": "msvc-pgo-use",
+      "configurePreset": "msvc-pgo-use",
+      "description": "Build MSVC optimized version using PGO profiles",
+      "configuration": "Release",
       "jobs": 0
     }
   ],
@@ -192,6 +306,48 @@
     {
       "name": "macos-debug",
       "configurePreset": "macos-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "gcc-pgo-generate",
+      "configurePreset": "gcc-pgo-generate",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "gcc-pgo-use",
+      "configurePreset": "gcc-pgo-use",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "clang-pgo-generate",
+      "configurePreset": "clang-pgo-generate",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "clang-pgo-use",
+      "configurePreset": "clang-pgo-use",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "msvc-pgo-generate",
+      "configurePreset": "msvc-pgo-generate",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "msvc-pgo-use",
+      "configurePreset": "msvc-pgo-use",
       "output": {
         "outputOnFailure": true
       }

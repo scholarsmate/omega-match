@@ -1,0 +1,44 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "PGO Workflow - GCC",
+			"type": "shell",
+			"command": "python",
+			"args": [
+				"scripts/pgo_workflow.py",
+				"--compiler",
+				"gcc"
+			],
+			"group": "build",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "PGO Workflow - Clang",
+			"type": "shell",
+			"command": "python",
+			"args": [
+				"scripts/pgo_workflow.py",
+				"--compiler",
+				"clang"
+			],
+			"group": "build",
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "PGO Workflow - MSVC",
+			"type": "shell",
+			"command": "python",
+			"args": [
+				"scripts/pgo_workflow.py",
+				"--compiler",
+				"msvc"
+			],
+			"group": "build",
+			"isBackground": false,
+			"problemMatcher": []
+		}
+	]
+}

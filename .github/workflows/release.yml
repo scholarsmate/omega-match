@@ -29,12 +29,32 @@ jobs:
             build_type: Release
             generator: "Visual Studio 17 2022"
             name: "Windows-MSVC"
+          - os: windows-latest
+            arch: x64
+            build_type: Release
+            generator: "Visual Studio 17 2022"
+            name: "Windows-MSVC-PGO"
+            pgo: true
           - os: ubuntu-latest
             arch: x64
             build_type: Release
             c_compiler: gcc
             cpp_compiler: g++
             name: "Linux-GCC"
+          - os: ubuntu-latest
+            arch: x64
+            build_type: Release
+            c_compiler: gcc
+            cpp_compiler: g++
+            name: "Linux-GCC-PGO"
+            pgo: true
+          - os: ubuntu-latest
+            arch: x64
+            build_type: Release
+            c_compiler: clang
+            cpp_compiler: clang++
+            name: "Linux-Clang-PGO"
+            pgo: true
           - os: ubuntu-24.04-arm
             arch: arm64
             build_type: Release
@@ -54,11 +74,23 @@ jobs:
     - name: Fetch all git tags
       run: git fetch --tags --force
 
+    - name: Set UTF-8 encoding (Windows)
+      if: runner.os == 'Windows'
+      run: chcp 65001
+      shell: cmd
+      
+    - name: Set PYTHONIOENCODING
+      run: echo "PYTHONIOENCODING=utf-8" >> $GITHUB_ENV
+
     - name: Install dependencies (Linux)
       if: runner.os == 'Linux'
       run: |
         sudo apt-get update
         sudo apt-get install -y cmake build-essential ninja-build libomp-dev rpm
+        # Install LLVM tools for Clang PGO
+        if [[ "${{ matrix.c_compiler }}" == "clang" && "${{ matrix.pgo }}" == "true" ]]; then
+          sudo apt-get install -y llvm
+        fi
 
     - name: Install dependencies (macOS)
       if: runner.os == 'macOS'
@@ -78,39 +110,75 @@ jobs:
     - name: Configure CMake
       run: |
         if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
-          cmake --preset release -DPython3_EXECUTABLE=$(which python)
+          if [ "${{ matrix.pgo }}" = "true" ]; then
+            # PGO builds use specific presets
+            if [ "${{ matrix.c_compiler }}" = "gcc" ]; then
+              cmake --preset gcc-pgo-generate -DPython3_EXECUTABLE=$(which python)
+            else
+              cmake --preset clang-pgo-generate -DPython3_EXECUTABLE=$(which python)
+            fi
+          else
+            cmake --preset release -DPython3_EXECUTABLE=$(which python)
+          fi
         elif [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
           cmake --preset release -DPython3_EXECUTABLE=$(which python)
         elif [ "${{ matrix.os }}" = "macos-latest" ]; then
           cmake --preset macos-release -DPython3_EXECUTABLE=$(which python)
         else
-          cmake -B build -G "${{ matrix.generator }}" -A x64 -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DPython3_EXECUTABLE=$(which python)
+          if [ "${{ matrix.pgo }}" = "true" ]; then
+            cmake --preset msvc-pgo-generate -DPython3_EXECUTABLE=$(which python)
+          else
+            cmake -B build -G "${{ matrix.generator }}" -A x64 -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DPython3_EXECUTABLE=$(which python)
+          fi
         fi
       shell: bash
 
     - name: Build
       run: |
         if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
-          cmake --build --preset release
+          if [ "${{ matrix.pgo }}" = "true" ]; then
+            # Run unified PGO workflow
+            python3 scripts/pgo_workflow.py --compiler ${{ matrix.c_compiler }}
+          else
+            cmake --build --preset release
+          fi
         elif [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
           cmake --build --preset release
         elif [ "${{ matrix.os }}" = "macos-latest" ]; then
           cmake --build --preset macos-release
         else
-          cmake --build build --config ${{ matrix.build_type }}
+          if [ "${{ matrix.pgo }}" = "true" ]; then
+            # Run unified MSVC PGO workflow
+            python scripts/pgo_workflow.py --compiler msvc
+          else
+            cmake --build build --config ${{ matrix.build_type }}
+          fi
         fi
       shell: bash
 
     - name: Test
       run: |
         if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
-          ctest --test-dir build-gcc-release --output-on-failure
+          if [ "${{ matrix.pgo }}" = "true" ]; then
+            # Test PGO optimized build
+            if [ "${{ matrix.c_compiler }}" = "gcc" ]; then
+              ctest --test-dir build-gcc-pgo-use --output-on-failure
+            else
+              ctest --test-dir build-clang-pgo-use --output-on-failure
+            fi
+          else
+            ctest --test-dir build-gcc-release --output-on-failure
+          fi
         elif [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
           ctest --test-dir build-gcc-release --output-on-failure
         elif [ "${{ matrix.os }}" = "macos-latest" ]; then
           ctest --test-dir build-clang-release --output-on-failure
         else
-          ctest --test-dir build --output-on-failure --build-config ${{ matrix.build_type }}
+          if [ "${{ matrix.pgo }}" = "true" ]; then
+            ctest --test-dir build-msvc-pgo-use --output-on-failure --build-config ${{ matrix.build_type }}
+          else
+            ctest --test-dir build --output-on-failure --build-config ${{ matrix.build_type }}
+          fi
         fi
       shell: bash
 
@@ -121,13 +189,27 @@ jobs:
     - name: Package
       run: |
         if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
-          cd build-gcc-release
+          if [ "${{ matrix.pgo }}" = "true" ]; then
+            # Package PGO optimized build
+            if [ "${{ matrix.c_compiler }}" = "gcc" ]; then
+              cd build-gcc-pgo-use
+            else
+              cd build-clang-pgo-use
+            fi
+          else
+            cd build-gcc-release
+          fi
         elif [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
           cd build-gcc-release
         elif [ "${{ matrix.os }}" = "macos-latest" ]; then
           cd build-clang-release
         else
-          cd build
+          # Windows packaging
+          if [ "${{ matrix.pgo }}" = "true" ]; then
+            cd build-msvc-pgo-use
+          else
+            cd build
+          fi
         fi
         if [ "${{ matrix.os }}" = "windows-latest" ]; then
           cpack -G WIX
@@ -145,10 +227,22 @@ jobs:
       shell: bash
 
     - name: Copy native library to Python package location (linux-x64)
-      if: matrix.os == 'ubuntu-latest'
+      if: matrix.os == 'ubuntu-latest' && matrix.pgo != true
       run: |
         mkdir -p bindings/python/omega_match/native/lib
         cp build-gcc-release/libomega_match.so bindings/python/omega_match/native/lib/libomega_match-linux-x64.so
+
+    - name: Copy PGO native library to Python package location (linux-x64-gcc-pgo)
+      if: matrix.os == 'ubuntu-latest' && matrix.pgo == true && matrix.c_compiler == 'gcc'
+      run: |
+        mkdir -p bindings/python/omega_match/native/lib
+        cp build-gcc-pgo-use/libomega_match.so bindings/python/omega_match/native/lib/libomega_match-linux-x64-gcc-pgo.so
+
+    - name: Copy PGO native library to Python package location (linux-x64-clang-pgo)
+      if: matrix.os == 'ubuntu-latest' && matrix.pgo == true && matrix.c_compiler == 'clang'
+      run: |
+        mkdir -p bindings/python/omega_match/native/lib
+        cp build-clang-pgo-use/libomega_match.so bindings/python/omega_match/native/lib/libomega_match-linux-x64-clang-pgo.so
 
     - name: Copy native library to Python package location (linux-arm64)
       if: matrix.os == 'ubuntu-24.04-arm'
@@ -157,10 +251,17 @@ jobs:
         cp build-gcc-release/libomega_match.so bindings/python/omega_match/native/lib/libomega_match-linux-arm64.so
 
     - name: Copy native library to Python package location (windows-x64)
-      if: matrix.os == 'windows-latest'
+      if: matrix.os == 'windows-latest' && matrix.pgo != true
       run: |
         mkdir -p bindings/python/omega_match/native/lib
         cp build/Release/omega_match.dll bindings/python/omega_match/native/lib/libomega_match-windows-x64.dll
+      shell: bash
+
+    - name: Copy PGO native library to Python package location (windows-x64-msvc-pgo)
+      if: matrix.os == 'windows-latest' && matrix.pgo == true
+      run: |
+        mkdir -p bindings/python/omega_match/native/lib
+        cp build-msvc-pgo-use/Release/omega_match.dll bindings/python/omega_match/native/lib/libomega_match-windows-x64-msvc-pgo.dll
       shell: bash
 
     - name: Copy native library to Python package location (macos-arm64)
@@ -170,11 +271,27 @@ jobs:
         cp build-clang-release/libomega_match.dylib bindings/python/omega_match/native/lib/libomega_match-macos-arm64.dylib
 
     - name: Upload native library artifact (linux-x64)
-      if: matrix.os == 'ubuntu-latest'
+      if: matrix.os == 'ubuntu-latest' && matrix.pgo != true
       uses: actions/upload-artifact@v4
       with:
         name: native-lib-linux-x64
         path: bindings/python/omega_match/native/lib/libomega_match-linux-x64.so
+        retention-days: 30
+
+    - name: Upload PGO native library artifact (linux-x64-gcc-pgo)
+      if: matrix.os == 'ubuntu-latest' && matrix.pgo == true && matrix.c_compiler == 'gcc'
+      uses: actions/upload-artifact@v4
+      with:
+        name: native-lib-linux-x64-gcc-pgo
+        path: bindings/python/omega_match/native/lib/libomega_match-linux-x64-gcc-pgo.so
+        retention-days: 30
+
+    - name: Upload PGO native library artifact (linux-x64-clang-pgo)
+      if: matrix.os == 'ubuntu-latest' && matrix.pgo == true && matrix.c_compiler == 'clang'
+      uses: actions/upload-artifact@v4
+      with:
+        name: native-lib-linux-x64-clang-pgo
+        path: bindings/python/omega_match/native/lib/libomega_match-linux-x64-clang-pgo.so
         retention-days: 30
 
     - name: Upload native library artifact (linux-arm64)
@@ -186,11 +303,19 @@ jobs:
         retention-days: 30
 
     - name: Upload native library artifact (windows-x64)
-      if: matrix.os == 'windows-latest'
+      if: matrix.os == 'windows-latest' && matrix.pgo != true
       uses: actions/upload-artifact@v4
       with:
         name: native-lib-windows-x64
         path: bindings/python/omega_match/native/lib/libomega_match-windows-x64.dll
+        retention-days: 30
+
+    - name: Upload PGO native library artifact (windows-x64-msvc-pgo)
+      if: matrix.os == 'windows-latest' && matrix.pgo == true
+      uses: actions/upload-artifact@v4
+      with:
+        name: native-lib-windows-x64-msvc-pgo
+        path: bindings/python/omega_match/native/lib/libomega_match-windows-x64-msvc-pgo.dll
         retention-days: 30
 
     - name: Upload native library artifact (macos-arm64)
@@ -205,32 +330,77 @@ jobs:
       if: matrix.os == 'ubuntu-latest' || matrix.os == 'ubuntu-24.04-arm'
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ matrix.os == 'ubuntu-latest' && 'linux-x64-deb' || 'linux-arm64-deb' }}
-        path: build-gcc-release/*.deb
+        name: ${{ matrix.os == 'ubuntu-latest' && (matrix.pgo == true && (matrix.c_compiler == 'gcc' && 'linux-x64-gcc-pgo-deb' || 'linux-x64-clang-pgo-deb') || 'linux-x64-deb') || 'linux-arm64-deb' }}
+        path: ${{ matrix.os == 'ubuntu-latest' && (matrix.pgo == true && (matrix.c_compiler == 'gcc' && 'build-gcc-pgo-use/*.deb' || 'build-clang-pgo-use/*.deb') || 'build-gcc-release/*.deb') || 'build-gcc-release/*.deb' }}
         retention-days: 30
 
     - name: Upload RPM package
       if: matrix.os == 'ubuntu-latest' || matrix.os == 'ubuntu-24.04-arm'
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ matrix.os == 'ubuntu-latest' && 'linux-x64-rpm' || 'linux-arm64-rpm' }}
-        path: build-gcc-release/*.rpm
+        name: ${{ matrix.os == 'ubuntu-latest' && (matrix.pgo == true && (matrix.c_compiler == 'gcc' && 'linux-x64-gcc-pgo-rpm' || 'linux-x64-clang-pgo-rpm') || 'linux-x64-rpm') || 'linux-arm64-rpm' }}
+        path: ${{ matrix.os == 'ubuntu-latest' && (matrix.pgo == true && (matrix.c_compiler == 'gcc' && 'build-gcc-pgo-use/*.rpm' || 'build-clang-pgo-use/*.rpm') || 'build-gcc-release/*.rpm') || 'build-gcc-release/*.rpm' }}
         retention-days: 30
 
     - name: Upload TGZ package
       if: matrix.os == 'ubuntu-latest' || matrix.os == 'ubuntu-24.04-arm' || matrix.os == 'macos-latest'
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ matrix.os == 'ubuntu-latest' && 'linux-x64-tar' || matrix.os == 'ubuntu-24.04-arm' && 'linux-arm64-tar' || 'macos-arm64-tar' }}
-        path: ${{ matrix.os == 'macos-latest' && 'build-clang-release/*.tar.gz' || 'build-gcc-release/*.tar.gz' }}
+        name: ${{ matrix.os == 'ubuntu-latest' && (matrix.pgo == true && (matrix.c_compiler == 'gcc' && 'linux-x64-gcc-pgo-tar' || 'linux-x64-clang-pgo-tar') || 'linux-x64-tar') || matrix.os == 'ubuntu-24.04-arm' && 'linux-arm64-tar' || 'macos-arm64-tar' }}
+        path: ${{ matrix.os == 'macos-latest' && 'build-clang-release/*.tar.gz' || matrix.os == 'ubuntu-latest' && (matrix.pgo == true && (matrix.c_compiler == 'gcc' && 'build-gcc-pgo-use/*.tar.gz' || 'build-clang-pgo-use/*.tar.gz') || 'build-gcc-release/*.tar.gz') || 'build-gcc-release/*.tar.gz' }}
         retention-days: 30
 
     - name: Upload WIX installer
-      if: matrix.os == 'windows-latest'
+      if: matrix.os == 'windows-latest' && matrix.pgo != true
       uses: actions/upload-artifact@v4
       with:
         name: windows-x64-installer
         path: build/*.msi
+        retention-days: 30
+
+    - name: Upload PGO WIX installer
+      if: matrix.os == 'windows-latest' && matrix.pgo == true
+      uses: actions/upload-artifact@v4
+      with:
+        name: windows-x64-msvc-pgo-installer
+        path: build-msvc-pgo-use/*.msi
+        retention-days: 30
+
+    - name: Validate PGO Build
+      if: matrix.pgo == true
+      run: |
+        echo "=== PGO Build Validation ==="
+        if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+          if [ "${{ matrix.c_compiler }}" = "gcc" ]; then
+            echo "Testing GCC PGO optimized binary..."
+            ./build-gcc-pgo-use/olm --version
+          else
+            echo "Testing Clang PGO optimized binary..."
+            ./build-clang-pgo-use/olm --version
+          fi
+        else
+          echo "Testing MSVC PGO optimized binary..."
+          ./build-msvc-pgo-use/Release/olm.exe --version
+        fi
+        echo "=== PGO validation complete ==="
+      shell: bash
+
+    - name: Upload artifacts for release
+      if: github.event_name == 'workflow_dispatch'
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-artifacts
+        path: |
+          build-gcc-release/*
+          build-gcc-pgo-use/*
+          build-clang-pgo-use/*
+          build-msvc-pgo-use/*
+          build/*
+          *.deb
+          *.rpm
+          *.tar.gz
+          *.msi
+          omega_match-*.whl
         retention-days: 30
 
   build-universal-wheel:
@@ -245,6 +415,18 @@ jobs:
           name: native-lib-linux-x64
           path: native-libs/native-lib-linux-x64
 
+      - name: Download native-lib-linux-x64-gcc-pgo
+        uses: actions/download-artifact@v4
+        with:
+          name: native-lib-linux-x64-gcc-pgo
+          path: native-libs/native-lib-linux-x64-gcc-pgo
+
+      - name: Download native-lib-linux-x64-clang-pgo
+        uses: actions/download-artifact@v4
+        with:
+          name: native-lib-linux-x64-clang-pgo
+          path: native-libs/native-lib-linux-x64-clang-pgo
+
       - name: Download native-lib-linux-arm64
         uses: actions/download-artifact@v4
         with:
@@ -257,6 +439,12 @@ jobs:
           name: native-lib-windows-x64
           path: native-libs/native-lib-windows-x64
 
+      - name: Download native-lib-windows-x64-msvc-pgo
+        uses: actions/download-artifact@v4
+        with:
+          name: native-lib-windows-x64-msvc-pgo
+          path: native-libs/native-lib-windows-x64-msvc-pgo
+
       - name: Download native-lib-macos-arm64
         uses: actions/download-artifact@v4
         with:
@@ -267,8 +455,11 @@ jobs:
         run: |
           set -e
           test -f native-libs/native-lib-linux-x64/libomega_match-linux-x64.so
+          test -f native-libs/native-lib-linux-x64-gcc-pgo/libomega_match-linux-x64-gcc-pgo.so
+          test -f native-libs/native-lib-linux-x64-clang-pgo/libomega_match-linux-x64-clang-pgo.so
           test -f native-libs/native-lib-linux-arm64/libomega_match-linux-arm64.so
           test -f native-libs/native-lib-windows-x64/libomega_match-windows-x64.dll
+          test -f native-libs/native-lib-windows-x64-msvc-pgo/libomega_match-windows-x64-msvc-pgo.dll
           test -f native-libs/native-lib-macos-arm64/libomega_match-macos-arm64.dylib
         shell: bash
 
@@ -276,8 +467,11 @@ jobs:
         run: |
           mkdir -p bindings/python/omega_match/native/lib
           cp native-libs/native-lib-linux-x64/libomega_match-linux-x64.so bindings/python/omega_match/native/lib/
+          cp native-libs/native-lib-linux-x64-gcc-pgo/libomega_match-linux-x64-gcc-pgo.so bindings/python/omega_match/native/lib/
+          cp native-libs/native-lib-linux-x64-clang-pgo/libomega_match-linux-x64-clang-pgo.so bindings/python/omega_match/native/lib/
           cp native-libs/native-lib-linux-arm64/libomega_match-linux-arm64.so bindings/python/omega_match/native/lib/
           cp native-libs/native-lib-windows-x64/libomega_match-windows-x64.dll bindings/python/omega_match/native/lib/
+          cp native-libs/native-lib-windows-x64-msvc-pgo/libomega_match-windows-x64-msvc-pgo.dll bindings/python/omega_match/native/lib/
           cp native-libs/native-lib-macos-arm64/libomega_match-macos-arm64.dylib bindings/python/omega_match/native/lib/
 
       - name: Set up Python
@@ -425,6 +619,12 @@ jobs:
           artifacts/linux-x64-deb/*.deb
           artifacts/linux-x64-rpm/*.rpm
           artifacts/linux-x64-tar/*.tar.gz
+          artifacts/linux-x64-gcc-pgo-deb/*.deb
+          artifacts/linux-x64-gcc-pgo-rpm/*.rpm
+          artifacts/linux-x64-gcc-pgo-tar/*.tar.gz
+          artifacts/linux-x64-clang-pgo-deb/*.deb
+          artifacts/linux-x64-clang-pgo-rpm/*.rpm
+          artifacts/linux-x64-clang-pgo-tar/*.tar.gz
           artifacts/linux-arm64-deb/*.deb
           artifacts/linux-arm64-rpm/*.rpm
           artifacts/linux-arm64-tar/*.tar.gz

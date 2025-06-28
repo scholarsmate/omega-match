@@ -6,7 +6,7 @@
 *.so
 *.tmp
 .idea/
-.venv/
+.venv*/
 CMakeCache.txt
 cmake-*/
 build*/

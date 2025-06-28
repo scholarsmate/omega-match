@@ -2,9 +2,10 @@ import requests
 import time
 import os
 
+
 def cache_btn_pages(start=1, end=92, out_dir="btn_cache", delay=1.5):
     os.makedirs(out_dir, exist_ok=True)
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {"User-Agent": "Mozilla/5.0"}
 
     for i in range(start, end + 1):
         url = f"https://www.behindthename.com/names/{i}"
@@ -24,6 +25,6 @@ def cache_btn_pages(start=1, end=92, out_dir="btn_cache", delay=1.5):
 
         time.sleep(delay)
 
+
 # Run this once to cache all pages
 cache_btn_pages()
-
