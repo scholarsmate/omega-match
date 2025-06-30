@@ -5,8 +5,10 @@ from bs4 import BeautifulSoup
 from collections import defaultdict
 from unidecode import unidecode
 
+
 def strip_number_suffix(name: str) -> str:
     return re.sub(r"\s+\d+$", "", name)
+
 
 def parse_btn_names_with_variants(cache_dir="btn_cache"):
     results = defaultdict(set)
@@ -33,7 +35,11 @@ def parse_btn_names_with_variants(cache_dir="btn_cache"):
             results[canonical]  # initialize set
 
             sibling = entry.find_next_sibling()
-            if sibling and sibling.name == "span" and "listname" in sibling.get("class", []):
+            if (
+                sibling
+                and sibling.name == "span"
+                and "listname" in sibling.get("class", [])
+            ):
                 for alt_tag in sibling.find_all("a", href=True):
                     alt_raw = alt_tag.text.strip()
                     alt = strip_number_suffix(alt_raw)
@@ -42,27 +48,27 @@ def parse_btn_names_with_variants(cache_dir="btn_cache"):
 
     return results
 
+
 def save_name_variant_map(name_map, output_file="name_variants.tsv"):
     with open(output_file, "w", encoding="utf-8") as f:
         for name in sorted(name_map):
             variants = sorted(name_map[name])
             f.write(f"{name}\t" + "\t".join(variants) + "\n")
 
-    with open("names_utf8.txt", "w", encoding="utf-8") as f_utf8, open("names_ascii.txt", "w", encoding="utf-8") as f_ascii:
+    with open("names_utf8.txt", "w", encoding="utf-8") as f_utf8, open(
+        "names_ascii.txt", "w", encoding="utf-8"
+    ) as f_ascii:
         for name in sorted(name_map):
             f_utf8.write(name + "\n")
             f_ascii.write(unidecode(name) + "\n")
+
 
 # set up logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("btn_parse.log"),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.FileHandler("btn_parse.log"), logging.StreamHandler()],
 )
 # Run both:
 name_variants = parse_btn_names_with_variants()
 save_name_variant_map(name_variants)
-

@@ -60,6 +60,71 @@ if(ENABLE_SANITIZERS)
 endif()
 
 # ---------------------------------------------------------------------------
+# Profile Guided Optimization (PGO)
+# ---------------------------------------------------------------------------
+option(ENABLE_PGO_GENERATE "Enable PGO instrumentation phase" OFF)
+option(ENABLE_PGO_USE "Enable PGO optimization phase" OFF)
+
+if(ENABLE_PGO_GENERATE AND ENABLE_PGO_USE)
+    message(FATAL_ERROR "Cannot enable both PGO_GENERATE and PGO_USE at the same time")
+endif()
+
+if(ENABLE_PGO_GENERATE)
+    message(STATUS "Enabling PGO instrumentation phase")
+    if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+        # GCC PGO - Generate phase
+        # Use default profile generation without specifying directory to avoid path issues
+        add_compile_options(-fprofile-generate)
+        add_link_options(-fprofile-generate)
+        message(STATUS "GCC PGO profiles will be written to default locations in build directory")
+    elseif(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        set(PGO_PROFILE_DIR "${CMAKE_BINARY_DIR}/pgo-profiles")
+        file(MAKE_DIRECTORY ${PGO_PROFILE_DIR})
+        add_compile_options(-fprofile-instr-generate=${PGO_PROFILE_DIR}/default_%p_%m.profraw)
+        add_link_options(-fprofile-instr-generate=${PGO_PROFILE_DIR}/default_%p_%m.profraw)
+        message(STATUS "Clang PGO profiles will be written to: ${PGO_PROFILE_DIR}")
+    elseif(CMAKE_C_COMPILER_ID STREQUAL "MSVC")
+        # MSVC PGO - Generate phase
+        set(PGO_PROFILE_DIR "${CMAKE_BINARY_DIR}/pgo-profiles")
+        file(MAKE_DIRECTORY ${PGO_PROFILE_DIR})
+        add_compile_options(/GL)  # Whole program optimization
+        add_link_options(/LTCG /GENPROFILE)  # Link-time code generation + profile generation
+        message(STATUS "MSVC PGO profiles will be written to: ${PGO_PROFILE_DIR}")
+    else()
+        message(WARNING "PGO instrumentation not supported for compiler: ${CMAKE_C_COMPILER_ID}")
+    endif()
+endif()
+
+if(ENABLE_PGO_USE)
+    message(STATUS "Enabling PGO optimization phase")
+    if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+        # For GCC, use profile data from the build directory (default location)
+        add_compile_options(-fprofile-use -fprofile-correction)
+        add_link_options(-fprofile-use)
+        # Loosen up: don't treat missing profile data as error (GCC 9+)
+        add_compile_options(-Wno-error=missing-profile)
+        message(STATUS "Using GCC PGO profiles from default locations in build directory")
+    elseif(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        set(PGO_PROFILE_DIR "${CMAKE_BINARY_DIR}/pgo-profiles")
+        set(PGO_MERGED_PROFILE "${PGO_PROFILE_DIR}/merged.profdata")
+        if(NOT EXISTS ${PGO_MERGED_PROFILE})
+            message(FATAL_ERROR "Merged PGO profile not found: ${PGO_MERGED_PROFILE}. Run merge step first.")
+        endif()
+        add_compile_options(-fprofile-instr-use=${PGO_MERGED_PROFILE})
+        add_link_options(-fprofile-instr-use=${PGO_MERGED_PROFILE})
+        message(STATUS "Using Clang PGO profile: ${PGO_MERGED_PROFILE}")
+    elseif(CMAKE_C_COMPILER_ID STREQUAL "MSVC")
+        # MSVC PGO - Use phase
+        # Profile data should be available from the generate phase
+        add_compile_options(/GL)  # Whole program optimization
+        add_link_options(/LTCG /USEPROFILE)  # Link-time code generation + profile use
+        message(STATUS "Using MSVC PGO profiles from previous training run")
+    else()
+        message(WARNING "PGO optimization not supported for compiler: ${CMAKE_C_COMPILER_ID}")
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
 # Sources and include dirs
 # ---------------------------------------------------------------------------
 file(GLOB OMEGA_MATCH_SOURCES CONFIGURE_DEPENDS
@@ -100,28 +165,34 @@ target_include_directories(omega_match_static
     $<INSTALL_INTERFACE:include>)
 target_compile_features(omega_match_static PUBLIC c_std_17)
 
-add_library(omega_match_shared SHARED ${OMEGA_MATCH_SOURCES})
-set_target_properties(omega_match_shared PROPERTIES
-    POSITION_INDEPENDENT_CODE ON
-    OUTPUT_NAME omega_match)                   # libomega_match.(so|dylib) or omega_match.dll
-target_include_directories(omega_match_shared
-    PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/omega_match/include>
-    $<INSTALL_INTERFACE:include>)
-target_compile_features(omega_match_shared PUBLIC c_std_17)
-
-# Export all symbols for Windows DLL
-if (WIN32)
-    # Enable automatic symbol export on Windows
+# Build shared library (conditionally - skip during PGO phases for MSVC compatibility)
+if(NOT (ENABLE_PGO_GENERATE OR ENABLE_PGO_USE) OR NOT MSVC)
+    add_library(omega_match_shared SHARED ${OMEGA_MATCH_SOURCES})
     set_target_properties(omega_match_shared PROPERTIES
-        WINDOWS_EXPORT_ALL_SYMBOLS TRUE
-        ARCHIVE_OUTPUT_NAME omega_match        # omega_match.lib (import library)
-        RUNTIME_OUTPUT_NAME omega_match        # omega_match.dll
-    )
-endif ()
+        POSITION_INDEPENDENT_CODE ON
+        OUTPUT_NAME omega_match)                   # libomega_match.(so|dylib) or omega_match.dll
+    target_include_directories(omega_match_shared
+        PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/omega_match/include>
+        $<INSTALL_INTERFACE:include>)
+    target_compile_features(omega_match_shared PUBLIC c_std_17)
 
-# Create the main alias for external use (defaults to shared when available)
-add_library(omega_match ALIAS omega_match_shared)
+    # Export all symbols for Windows DLL
+    if (WIN32)
+        # Enable automatic symbol export on Windows
+        set_target_properties(omega_match_shared PROPERTIES
+            WINDOWS_EXPORT_ALL_SYMBOLS TRUE
+            ARCHIVE_OUTPUT_NAME omega_match        # omega_match.lib (import library)
+            RUNTIME_OUTPUT_NAME omega_match        # omega_match.dll
+        )
+    endif ()
+
+    # Create the main alias for external use (defaults to shared when available)
+    add_library(omega_match ALIAS omega_match_shared)
+else()
+    # During MSVC PGO phases, use static library as main target
+    add_library(omega_match ALIAS omega_match_static)
+endif()
 
 
 # ---------------------------------------------------------------------------
@@ -184,9 +255,11 @@ macro(configure_omega_match_target target_name)
     endif ()
 endmacro()
 
-# Apply configuration to both libraries
+# Apply configuration to libraries
 configure_omega_match_target(omega_match_static)
-configure_omega_match_target(omega_match_shared)
+if(NOT (ENABLE_PGO_GENERATE OR ENABLE_PGO_USE) OR NOT MSVC)
+    configure_omega_match_target(omega_match_shared)
+endif()
 
 # ---------------------------------------------------------------------------
 # Optional CLI tool (always uses static library to avoid DLL issues)
@@ -212,6 +285,22 @@ if (OMEGA_MATCH_BUILD_CLI)
     target_link_libraries(olm PRIVATE OpenMP::OpenMP_C)
 
     install(TARGETS olm RUNTIME DESTINATION bin)
+
+    # --- MSVC PGO: Copy pgort140.dll next to olm.exe ---
+    if(MSVC AND (ENABLE_PGO_GENERATE OR ENABLE_PGO_USE))
+        set(PGORT_DLL "${VCToolsInstallDir}/bin/Hostx64/x64/pgort140.dll")
+        if(NOT EXISTS "${PGORT_DLL}")
+            set(PGORT_DLL "${VCToolsInstallDir}/bin/Hostx86/x86/pgort140.dll")
+        endif()
+        if(EXISTS "${PGORT_DLL}")
+            add_custom_command(TARGET olm POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PGORT_DLL}" "$<TARGET_FILE_DIR:olm>"
+                COMMENT "Copying pgort140.dll for MSVC PGO build (instrumented or optimized)"
+            )
+        else()
+            message(WARNING "pgort140.dll not found! MSVC PGO build may not run.")
+        endif()
+    endif()
 endif ()
 
 # ---------------------------------------------------------------------------
@@ -296,12 +385,14 @@ install(TARGETS omega_match_static
         LIBRARY DESTINATION lib
         RUNTIME DESTINATION bin)
 
-# Conditionally install shared library
-install(TARGETS omega_match_shared
-        EXPORT omega_matchTargets
-        ARCHIVE DESTINATION lib
-        LIBRARY DESTINATION lib
-        RUNTIME DESTINATION bin)
+# Conditionally install shared library (only when not in MSVC PGO phases)
+if(NOT (ENABLE_PGO_GENERATE OR ENABLE_PGO_USE) OR NOT MSVC)
+    install(TARGETS omega_match_shared
+            EXPORT omega_matchTargets
+            ARCHIVE DESTINATION lib
+            LIBRARY DESTINATION lib
+            RUNTIME DESTINATION bin)
+endif()
 
 install(DIRECTORY omega_match/include/ DESTINATION omega_match/include)
 
@@ -372,10 +463,11 @@ endif()
 include(CPack)
 
 # ---------------------------------------------------------------------------
-# Copy shared library to Python bindings with platform-specific name
+# Copy shared library to Python bindings with platform-specific name (skip during MSVC PGO phases)
 # ---------------------------------------------------------------------------
-set(PYBINDINGS_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/bindings/python/omega_match/native/lib")
-file(MAKE_DIRECTORY ${PYBINDINGS_LIB_DIR})
+if(NOT (ENABLE_PGO_GENERATE OR ENABLE_PGO_USE) OR NOT MSVC)
+    set(PYBINDINGS_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/bindings/python/omega_match/native/lib")
+    file(MAKE_DIRECTORY ${PYBINDINGS_LIB_DIR})
 
 if (WIN32)
     # Only x64 currently provided for Windows
@@ -422,15 +514,15 @@ elseif(UNIX)
 endif()
 
 # ---------------------------------------------------------------------------
-# Build Python wheel for bindings (optional target)
+# Build Python wheel for bindings (optional target, skip during PGO generation)
 # ---------------------------------------------------------------------------
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
-add_custom_target(python_wheel
-    COMMAND ${Python3_EXECUTABLE} -m build --wheel
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bindings/python
-    COMMENT "Building Python wheel for omega_match Python bindings"
-)
-add_dependencies(python_wheel omega_match_shared)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_custom_target(python_wheel
+        COMMAND ${Python3_EXECUTABLE} -m build --wheel
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bindings/python
+        COMMENT "Building Python wheel for omega_match Python bindings"
+    )
+    add_dependencies(python_wheel omega_match_shared)
 
 add_custom_target(python_binding_tests
     COMMAND ${Python3_EXECUTABLE} -m pip install -e .
@@ -444,3 +536,8 @@ add_test(NAME python_pytest
     COMMAND ${Python3_EXECUTABLE} -m pytest tests
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bindings/python
 )
+endif()
+
+if (MSVC)
+    add_definitions(-D_CRT_SECURE_NO_WARNINGS)
+endif()
