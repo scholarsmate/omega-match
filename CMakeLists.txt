@@ -165,6 +165,7 @@ find_package(OpenMP REQUIRED)
 
 # Helper macro to avoid code duplication
 macro(configure_omega_match_target target_name)
+    message(STATUS "OpenMP found @ " OpenMP)
     # Always link OpenMP (required dependency)
     target_link_libraries(${target_name} PUBLIC OpenMP::OpenMP_C)
     target_compile_definitions(${target_name} PUBLIC OMEGA_MATCH_USE_OPENMP=1)

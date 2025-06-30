@@ -8,3 +8,4 @@ build = "build.rs"
 crate-type = ["rlib"]
 
 [dependencies]
+libc = "0.2.174"
