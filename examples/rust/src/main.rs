@@ -1,69 +1,43 @@
-use std::{error::Error, rc::Rc, str::FromStr};
+#![allow(warnings)]
+mod cli;
+mod opts;
+use rolm::config::modes::AppModes;
+use std::str::FromStr;
 
-use rolm::ProgramArgs;
+use crate::{cli::validate_args, opts::CLIOptions};
 
-fn get_app_mode_arg(arg: &str) -> rolm::config::modes::AppModes {
-    match rolm::config::modes::AppModes::from_str(&arg) {
-        Ok(mode) => mode,
-        Err(mode) => mode,
-    }
-}
-
-fn main() -> Result<(), &'static str> {
+fn main() -> Result<(), String> {
     let ver = rolm::version();
     println!("Version {}", ver);
 
-    let mut argPos = 0;
-
     let cli_args: Vec<String> = std::env::args().collect();
-    if cli_args.len() < 2 {
-        return Err("Invalid arg count");
+    validate_args(&cli_args);
+    let mode = cli::get_app_mode_arg(&cli_args[1])?;
+
+    let mut arg_pos: usize = 3;
+
+    let match_options = cli::extract_match_options(&cli_args)?;
+    arg_pos = arg_pos + match_options.len();
+
+    let matchFile = cli::extract_match_file(&cli_args, &arg_pos)?;
+    let matchConfig = cli::extract_config_file(&cli_args, &arg_pos)?;
+
+    rolm::matcher::enable_modifier("verbose");
+    match mode {
+        AppModes::MATCH => {
+            let mut olm_matcher =
+                rolm::matcher::Matcher::new(&matchConfig, &matchFile, match_options);
+
+            CLIOptions::if_set_then(CLIOptions::Verbose, || olm_matcher.emit_header_info());
+
+            let mut haystack_size: usize = 0;
+            olm_matcher.execute(&mut haystack_size);
+        }
+        AppModes::COMPILE => {
+            todo!()
+        }
+        AppModes::UNDEFINED => panic!("Cannot execute w/ undefined mode"),
     }
-    let mode = get_app_mode_arg(&cli_args[1]);
-    let mut prog = ProgramArgs::new(mode);
 
-    argPos = argPos + 2;
-
-    println!("App Mode: {}", &prog.app_mode.to_string());
-
-    if cli_args.len() > 2 {
-        cli_args.iter().for_each(|arg_str| {
-            if arg_str.starts_with("--") {
-                argPos = argPos + 1;
-                match rolm::config::modifiers::ModifierParser::get(&arg_str) {
-                    Ok(modifier) => prog.add_modifiers(modifier),
-                    Err(e) => panic!("{}", e),
-                }
-            }
-        });
-    }
-
-    if cli_args.len() - argPos != 2 {
-        return Err("No filepaths detected in arguments");
-    }
-    let match_file_idx = cli_args.len() - 1;
-    let match_config_idx = cli_args.len() - 2;
-    let matchFile = std::path::Path::new(&cli_args[match_file_idx]);
-    let matchConfig = std::path::Path::new(&cli_args[match_config_idx]);
-
-    println!("Config filepath: {:?}", matchConfig);
-    println!("Match-file filepath: {:?}", matchFile);
-
-    let match_ptr = rolm::create_matcher(&matchConfig).expect("Couldn't create matcher");
-
-    rolm::match_compile_patterns(&matchConfig, &matchFile, &prog).expect("comp failed");
-    // let mode = rolm::dispatch::OmegaAppMode::MODE_UNDEFINED;
-
-    /*
-        olm
-            match
-                --no-overlap
-                --word-boundary
-                --longest
-            ../../data/names.txt
-            ../../data/kjv.txt
-    */
-
-    // rolm::execute(match, [<opts>], <arg1>, <arg2>)
     Ok(())
 }
