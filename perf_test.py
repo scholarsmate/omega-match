@@ -2,20 +2,15 @@
 """
 Performance testing script for omega_match library.
 
-This script benchmarks the omega_match library against grep-like tools.
-It automatically detects available tools:
-- grep (Linux/Unix/WSL/MSYS2) - Most accurate for comparisons
-- pwsh (PowerShell Core 6.x+) - Cross-platform PowerShell
-- powershell (Windows PowerShell 5.x) - Windows built-in PowerShell
+This script benchmarks the omega_match library against grep when available.
+It automatically detects if grep is available on the system for comparisons.
 
-The script gracefully handles systems without grep by using PowerShell's
-Select-String cmdlet and regex matching as an alternative for pattern matching
-comparisons. PowerShell implementation generates temporary scripts to handle
-complex pattern matching scenarios like line anchors and word boundaries.
+On systems without grep, the script will skip output comparisons and focus
+on performance benchmarking only. This is common on Windows systems where
+grep is not typically installed by default.
 
-Note: PowerShell comparisons may show mismatches due to different regex engines
-and output formatting compared to GNU grep, but provide a functional alternative
-for performance testing on Windows systems.
+The script gracefully handles systems without grep by providing performance
+metrics for omega_match while noting that output comparisons are not available.
 """
 import os
 import subprocess
@@ -33,14 +28,18 @@ HAYSTACK_SIZE_MB = 1024
 
 def get_binary_paths():
     """Detect the correct binary paths for different build systems."""
-    # Windows MSVC builds
+    # CMake builds
     debug_candidates = [
         "./build-msvc-debug/Debug/olm.exe",
+        "./build-gcc-debug/olm",
+        "./build-clang-debug/olm",
         "./cmake-build-debug/olm.exe",
         "./cmake-build-debug/olm",
     ]
     release_candidates = [
         "./build-msvc-release/Release/olm.exe",
+        "./build-gcc-release/olm",
+        "./build-clang-release/olm",
         "./cmake-build-release/olm.exe",
         "./cmake-build-release/olm",
     ]
@@ -70,45 +69,40 @@ DEFAULT_COMPILED_EXT = ".olm"
 MATCH_VARIANTS = {
     "baseline": f"--threads {OMP_THREADS}",
     "ignore-case": f"--threads {OMP_THREADS} --ignore-case",
-    "word-boundary": f"--threads {OMP_THREADS} --word-boundary",
-    "word-prefix": f"--threads {OMP_THREADS} --word-prefix",
-    "word-suffix": f"--threads {OMP_THREADS} --word-suffix",
-    "ignore-case+word-boundary": f"--threads {OMP_THREADS} --ignore-case --word-boundary",
-    "ignore-punct": f"--threads {OMP_THREADS} --ignore-punctuation",
     "ignore-case+ignore-punct": f"--threads {OMP_THREADS} --ignore-case --ignore-punctuation",
     "ignore-case+ignore-punct+word-boundary": f"--threads {OMP_THREADS} --ignore-case --ignore-punctuation --word-boundary",
     "ignore-case+ignore-punct+word-boundary+elide-whitespace": f"--threads {OMP_THREADS} --ignore-case --ignore-punctuation --elide-whitespace --word-boundary",
     "ignore-case+no-overlap+longest": f"--threads {OMP_THREADS} --ignore-case --no-overlap --longest",
-    "longest": f"--threads {OMP_THREADS} --longest",
-    "no-overlap": f"--threads {OMP_THREADS} --no-overlap",
-    "longest+word-boundary": f"--threads {OMP_THREADS} --longest --word-boundary",
-    "no-overlap+word-boundary": f"--threads {OMP_THREADS} --no-overlap --word-boundary",
+    "ignore-case+word-boundary": f"--threads {OMP_THREADS} --ignore-case --word-boundary",#
+    "ignore-punct": f"--threads {OMP_THREADS} --ignore-punctuation",
+    "line-end": f"--threads {OMP_THREADS} --line-end --longest --no-overlap",
+    "line-end+ignore-case": f"--threads {OMP_THREADS} --line-end --ignore-case --longest --no-overlap",
+    "line-end+word-boundary": f"--threads {OMP_THREADS} --line-end --word-boundary --longest --no-overlap",
+    "line-start": f"--threads {OMP_THREADS} --line-start --longest --no-overlap",
+    "line-start+ignore-case": f"--threads {OMP_THREADS} --line-start --ignore-case --longest --no-overlap",
+    "line-start+line-end": f"--threads {OMP_THREADS} --line-start --line-end --longest --no-overlap",
+    "line-start+line-end+word-boundary": f"--threads {OMP_THREADS} --line-start --line-end --word-boundary --longest --no-overlap",
     "longest+no-overlap": f"--threads {OMP_THREADS} --longest --no-overlap",
     "longest+no-overlap+word-boundary": f"--threads {OMP_THREADS} --longest --no-overlap --word-boundary",
-    "line-start": f"--threads {OMP_THREADS} --line-start --longest --no-overlap",
-    "line-end": f"--threads {OMP_THREADS} --line-end --longest --no-overlap",
-    "line-start+line-end": f"--threads {OMP_THREADS} --line-start --line-end --longest --no-overlap",
-    "line-start+word-boundary": f"--threads {OMP_THREADS} --line-start --word-boundary --longest --no-overlap",
-    "line-end+word-boundary": f"--threads {OMP_THREADS} --line-end --word-boundary --longest --no-overlap",
-    "line-start+ignore-case": f"--threads {OMP_THREADS} --line-start --ignore-case --longest --no-overlap",
-    "line-end+ignore-case": f"--threads {OMP_THREADS} --line-end --ignore-case --longest --no-overlap",
-    "line-start+line-end+word-boundary": f"--threads {OMP_THREADS} --line-start --line-end --word-boundary --longest --no-overlap",
+    "no-overlap+word-boundary": f"--threads {OMP_THREADS} --no-overlap --word-boundary",
+    "word-boundary": f"--threads {OMP_THREADS} --word-boundary",
+    "word-prefix": f"--threads {OMP_THREADS} --word-prefix",
+    "word-suffix": f"--threads {OMP_THREADS} --word-suffix",
 }
 
 # Grep variants: grep CLI flags (only when grep can simulate it)
 GREP_VARIANTS = {
-    "longest+no-overlap": "-F -o -b",
     "ignore-case+no-overlap+longest": "-F -o -b -i",
-    "longest+no-overlap+word-boundary": "-F -o -b -w",
     "ignore-case+word-boundary": "-F -o -b -i -w",
-    "line-start": "-E -o -b",
     "line-end": "-E -o -b",
-    "line-start+line-end": "-E -o -b",
-    "line-start+word-boundary": "-E -o -b",
-    "line-end+word-boundary": "-E -o -b",
-    "line-start+ignore-case": "-E -o -b -i",
     "line-end+ignore-case": "-E -o -b -i",
+    "line-end+word-boundary": "-E -o -b",
+    "line-start": "-E -o -b",
+    "line-start+ignore-case": "-E -o -b -i",
+    "line-start+line-end": "-E -o -b",
     "line-start+line-end+word-boundary": "-E -o -b",
+    "longest+no-overlap": "-F -o -b",
+    "longest+no-overlap+word-boundary": "-F -o -b -w",
 }
 
 
@@ -158,14 +152,22 @@ def run_perf_test(binary, flags, show_status=False, test_name=""):
 
 def detect_grep_tool():
     """Detect available grep-like tools and return the best one."""
-    # Prefer grep if available (most accurate)
+    # Check for direct grep first (Linux/Unix/WSL)
     if shutil.which("grep"):
         return "grep"
-    # Fall back to PowerShell variants
-    elif shutil.which("pwsh"):
-        return "pwsh"
-    elif shutil.which("powershell"):
-        return "powershell"
+    # Check for grep through bash (Git Bash on Windows)
+    elif shutil.which("bash"):
+        try:
+            result = subprocess.run(
+                ["bash", "-c", "grep --version"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                return "bash-grep"
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+            pass
     return None
 
 
@@ -173,78 +175,20 @@ def build_grep_command(tool, grep_flags, pattern_file, haystack, test_name):
     """Build command for different grep-like tools."""
     if tool == "grep":
         return ["grep"] + grep_flags.split() + ["-f", pattern_file, haystack]
-    elif tool in ["powershell", "pwsh"]:
-        # For PowerShell, we'll use Select-String with proper flag handling
-        import tempfile
-
-        case_sensitive = "-i" not in grep_flags
-        word_boundary = "word-boundary" in test_name
-        line_start = "line-start" in test_name
-        line_end = "line-end" in test_name
-
-        # Create a temporary PowerShell script
-        script_fd, script_path = tempfile.mkstemp(suffix=".ps1", text=True)
-        try:
-            with os.fdopen(script_fd, "w", encoding="utf-8") as script_file:
-                # Convert relative paths to absolute paths for PowerShell
-                abs_pattern_file = os.path.abspath(pattern_file).replace("\\", "\\\\")
-                abs_haystack = os.path.abspath(haystack).replace("\\", "\\\\")
-
-                script_content = f"""
-# Read patterns from file
-$patterns = Get-Content '{abs_pattern_file}' | Where-Object {{ $_.Trim() -ne '' }}
-
-# Modify patterns based on test requirements
-if ('{word_boundary}' -eq 'True') {{
-    $patterns = $patterns | ForEach-Object {{ "\\b$_\\b" }}
-}}
-if ('{line_start}' -eq 'True' -and '{line_end}' -eq 'True') {{
-    $patterns = $patterns | ForEach-Object {{ "^$_$" }}
-}} elseif ('{line_start}' -eq 'True') {{
-    $patterns = $patterns | ForEach-Object {{ "^$_" }}
-}} elseif ('{line_end}' -eq 'True') {{
-    $patterns = $patterns | ForEach-Object {{ "$_$" }}
-}}
-
-# Process the haystack file line by line to calculate offsets
-$lineOffset = 0
-$content = Get-Content '{abs_haystack}' -Raw
-$lines = $content -split "`r?`n"
-
-for ($i = 0; $i -lt $lines.Length; $i++) {{
-    $line = $lines[$i]
-    
-    # Find matches in this line
-    foreach ($pattern in $patterns) {{
-        $matches = [regex]::Matches($line, $pattern, $(if ('{case_sensitive}' -eq 'True') {{ 'None' }} else {{ 'IgnoreCase' }}))
-        
-        foreach ($match in $matches) {{
-            $offset = $lineOffset + $match.Index
-            Write-Output "$offset:$($match.Value)"
-        }}
-    }}
-    
-    $lineOffset += $line.Length + 1  # +1 for newline
-}}
-"""
-                script_file.write(script_content)
-
-            return [tool, "-ExecutionPolicy", "Bypass", "-File", script_path]
-        except Exception as e:
-            if os.path.exists(script_path):
-                os.unlink(script_path)
-            return None
+    elif tool == "bash-grep":
+        # Use bash to run grep command
+        grep_cmd = "grep " + grep_flags + " -f " + pattern_file + " " + haystack
+        return ["bash", "-c", grep_cmd]
     return None
 
 
 def run_grep_perf_test(grep_flags, test_name, show_status=False):
-    import tempfile
 
     tool = detect_grep_tool()
     if not tool:
         if show_status:
             print(
-                f"[WARNING] No grep-like tool found, skipping grep test for {test_name}"
+                f"[WARNING] No grep tool found, skipping grep test for {test_name}"
             )
         return "N/A"
 
@@ -253,31 +197,34 @@ def run_grep_perf_test(grep_flags, test_name, show_status=False):
 
     pattern_file = PATTERNS
     temp_pattern_file = None
-    temp_script_file = None
-
-    # For PowerShell, we don't need to modify the pattern file - we'll handle it in the script
-    # For grep, create temporary pattern file if needed for line anchors and word boundaries
-    if tool == "grep" and ("line-start" in test_name or "line-end" in test_name):
-        temp_pattern_file = tempfile.NamedTemporaryFile(
-            delete=False, mode="w", encoding="utf-8", suffix=".txt"
-        )
-        with open(PATTERNS, "r", encoding="utf-8") as pf:
-            for line in pf:
-                line = line.rstrip("\n")
-                if test_name in [
-                    "line-start+line-end",
-                    "line-start+line-end+word-boundary",
-                ]:
-                    line = f"^{line}$"
-                elif "line-start" in test_name:
-                    line = f"^{line}"
-                elif "line-end" in test_name:
-                    line = f"{line}$"
-                if "word-boundary" in test_name:
-                    line = f"\\b{line}\\b"
-                temp_pattern_file.write(line + "\n")
-        temp_pattern_file.close()
-        pattern_file = temp_pattern_file.name
+    
+    # For grep and bash-grep, create temporary pattern file if needed for line anchors and word boundaries
+    if tool in ["grep", "bash-grep"] and ("line-start" in test_name or "line-end" in test_name):
+            # Create temp file in current directory so bash can access it
+            import uuid
+            temp_filename = f"temp_patterns_{uuid.uuid4().hex[:8]}.txt"
+            with open(temp_filename, "w", encoding="utf-8", newline='\n') as temp_pattern_file:
+                with open(PATTERNS, "r", encoding="utf-8") as pf:
+                    for line in pf:
+                        line = line.rstrip("\n\r")  # Remove both Windows and Unix line endings
+                        if test_name in [
+                            "line-start+line-end",
+                            "line-start+line-end+word-boundary",
+                        ]:
+                            line = f"^{line}$"
+                            # Don't add word boundaries for full line matches - they're redundant
+                        elif "line-start" in test_name:
+                            line = f"^{line}"
+                            if "word-boundary" in test_name:
+                                line = f"^\\b{line}"  # Correct: line start + word boundary
+                        elif "line-end" in test_name:
+                            line = f"{line}$"
+                            if "word-boundary" in test_name:
+                                line = f"{line}\\b$"  # Correct: word boundary + line end
+                        elif "word-boundary" in test_name:
+                            line = f"\\b{line}\\b"
+                        temp_pattern_file.write(line + "\n")  # Use explicit Unix line ending
+            pattern_file = temp_filename
 
     try:
         cmd = build_grep_command(tool, grep_flags, pattern_file, HAYSTACK, test_name)
@@ -285,10 +232,6 @@ def run_grep_perf_test(grep_flags, test_name, show_status=False):
             if show_status:
                 print("\r" + " " * 120, end="\r", flush=True)  # Clear the status line
             return "ERR"
-
-        # Store the script file path if PowerShell is used
-        if tool in ["powershell", "pwsh"] and len(cmd) > 4:
-            temp_script_file = cmd[4]  # The script file path
 
         start = time.perf_counter()
         subprocess.run(
@@ -308,10 +251,8 @@ def run_grep_perf_test(grep_flags, test_name, show_status=False):
         return "ERR"
     finally:
         # Clean up temporary files
-        if temp_pattern_file and os.path.exists(temp_pattern_file.name):
-            os.unlink(temp_pattern_file.name)
-        if temp_script_file and os.path.exists(temp_script_file):
-            os.unlink(temp_script_file)
+        if pattern_file != PATTERNS and os.path.exists(pattern_file):
+            os.unlink(pattern_file)
 
 
 def normalize(path):
@@ -329,68 +270,87 @@ def compare_outputs(release_build, flags, test_name, grep_flags=None):
 
     # Run grep and save output
     if grep_flags:
-        import tempfile
-
         tool = detect_grep_tool()
         if not tool:
             return "N/A"
 
         pattern_file = PATTERNS
-        temp_pattern_file = None
-        temp_script_file = None
-        # For PowerShell, we don't need to modify the pattern file - we'll handle it in the script
-        # For grep, create temporary pattern file for line anchors and word boundaries
-        if tool == "grep" and ("line-start" in test_name or "line-end" in test_name):
-            temp_pattern_file = tempfile.NamedTemporaryFile(
-                delete=False, mode="w", encoding="utf-8", suffix=".txt"
-            )
-            with open(PATTERNS, "r", encoding="utf-8") as pf:
-                for line in pf:
-                    line = line.rstrip("\n")
-                    if test_name in [
-                        "line-start+line-end",
-                        "line-start+line-end+word-boundary",
-                    ]:
-                        line = f"^{line}$"
-                    elif "line-start" in test_name:
-                        line = f"^{line}"
-                    elif "line-end" in test_name:
-                        line = f"{line}$"
-                    if "word-boundary" in test_name:
-                        line = f"\\b{line}\\b"
-                    temp_pattern_file.write(line + "\n")
-            temp_pattern_file.close()
-            pattern_file = temp_pattern_file.name
+        
+        # For grep and bash-grep, create temporary pattern file for line anchors and word boundaries
+        if tool in ["grep", "bash-grep"] and ("line-start" in test_name or "line-end" in test_name):
+            # Create temp file in current directory so bash can access it
+            import uuid
+            temp_filename = f"temp_patterns_{uuid.uuid4().hex[:8]}.txt"
+            with open(temp_filename, "w", encoding="utf-8", newline='\n') as temp_pattern_file:
+                with open(PATTERNS, "r", encoding="utf-8") as pf:
+                    for line in pf:
+                        line = line.rstrip("\n\r")  # Remove both Windows and Unix line endings
+                        if test_name in [
+                            "line-start+line-end",
+                            "line-start+line-end+word-boundary",
+                        ]:
+                            line = f"^{line}$"
+                            # Don't add word boundaries for full line matches - they're redundant
+                        elif "line-start" in test_name:
+                            line = f"^{line}"
+                            if "word-boundary" in test_name:
+                                line = f"\\b{line}"
+                        elif "line-end" in test_name:
+                            line = f"{line}$"
+                            if "word-boundary" in test_name:
+                                line = f"{line}\\b"
+                        elif "word-boundary" in test_name:
+                            line = f"\\b{line}\\b"
+                        temp_pattern_file.write(line + "\n")  # Use explicit Unix line ending
+            pattern_file = temp_filename
 
         try:
             cmd = build_grep_command(
                 tool, grep_flags, pattern_file, HAYSTACK, test_name
             )
             if cmd:
-                # Store the script file path if PowerShell is used
-                if tool in ["powershell", "pwsh"] and len(cmd) > 4:
-                    temp_script_file = cmd[4]  # The script file path
-
                 with open(grep_out, "w", encoding="utf-8") as f:
                     subprocess.run(
                         cmd, stdout=f, stderr=subprocess.DEVNULL, check=False
                     )
         finally:
             # Clean up temporary files
-            if temp_pattern_file and os.path.exists(temp_pattern_file.name):
-                os.unlink(temp_pattern_file.name)
-            if temp_script_file and os.path.exists(temp_script_file):
-                os.unlink(temp_script_file)
+            if pattern_file != PATTERNS and os.path.exists(pattern_file):
+                os.unlink(pattern_file)
 
     # Compare outputs
     try:
         if not os.path.exists(grep_out):
             return "N/A"
-        if normalize(olm_out) == normalize(grep_out):
+        
+        # Read and normalize both outputs
+        olm_content = normalize(olm_out)
+        grep_content = normalize(grep_out)
+        
+        if olm_content == grep_content:
             return "OK"
         else:
+            # For debugging - save a copy with test name to inspect mismatches
+            debug_olm = f"debug_olm_{test_name}.txt"
+            debug_grep = f"debug_grep_{test_name}.txt"
+            
+            with open(debug_olm, "w", encoding="utf-8") as f:
+                f.write(olm_content)
+            with open(debug_grep, "w", encoding="utf-8") as f:
+                f.write(grep_content)
+                
+            # Quick analysis of the difference
+            olm_lines = olm_content.split('\n')
+            grep_lines = grep_content.split('\n')
+            
+            print(f"[DEBUG] {test_name}: OLM lines={len(olm_lines)}, Grep lines={len(grep_lines)}")
+            if len(olm_lines) > 0 and len(grep_lines) > 0:
+                print(f"[DEBUG] {test_name}: First OLM line: {repr(olm_lines[0][:100])}")
+                print(f"[DEBUG] {test_name}: First Grep line: {repr(grep_lines[0][:100])}")
+            
             return "MISMATCH"
-    except Exception:
+    except Exception as e:
+        print(f"[ERROR] Comparison failed for {test_name}: {e}")
         return "MISMATCH"
     finally:
         # Clean up temporary files with retry logic
@@ -420,6 +380,7 @@ Examples:
   %(prog)s --no-grep               # Run tests without grep comparisons
   %(prog)s --show-status           # Show status messages during execution
   %(prog)s --no-grep --show-status # Skip grep and show status messages
+  %(prog)s --tests baseline,line-start,word-boundary  # Run only specified tests
         """,
     )
 
@@ -435,11 +396,39 @@ Examples:
         help="Show status messages indicating which tests are currently running",
     )
 
+    parser.add_argument(
+        "--tests",
+        type=str,
+        help="Comma-separated list of specific tests to run. Use 'list' to see available tests.",
+    )
+
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+
+    # Handle test listing and selection
+    if args.tests == "list":
+        print("Available tests:")
+        for test_name in MATCH_VARIANTS.keys():
+            print(f"  {test_name}")
+        return
+
+    # Determine which tests to run
+    if args.tests:
+        selected_tests = [test.strip() for test in args.tests.split(",")]
+        # Validate test names
+        invalid_tests = [test for test in selected_tests if test not in MATCH_VARIANTS]
+        if invalid_tests:
+            print(f"[ERROR] Invalid test names: {', '.join(invalid_tests)}")
+            print("Use --tests list to see available tests.")
+            return
+        tests_to_run = {name: flags for name, flags in MATCH_VARIANTS.items() if name in selected_tests}
+        print(f"[INFO] Running {len(tests_to_run)} selected tests: {', '.join(selected_tests)}")
+    else:
+        tests_to_run = MATCH_VARIANTS
+        print(f"[INFO] Running all {len(tests_to_run)} tests")
 
     generate_haystack()
 
@@ -478,9 +467,9 @@ def main():
         print("-" * 85)
     else:
         print(
-            f"{'Test Case':56} | {'Debug MB/s':12} | {'Release MB/s':12} | {'Grep MB/s':12} | {'Compare':8}"
+            f"{'Test Case':56} | {'Debug MB/s':12} | {'Release MB/s':12} | {'Grep MB/s':12} | {'Ratio':8} | {'Compare':8}"
         )
-        print("-" * 113)
+        print("-" * 130)
 
     with open(CSV_FILE, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.writer(csvfile)
@@ -494,11 +483,12 @@ def main():
                     "debug_mb_s",
                     "release_mb_s",
                     "grep_mb_s",
+                    "release_grep_ratio",
                     "compare_status",
                 ]
             )
 
-        for test_name, flags in MATCH_VARIANTS.items():
+        for test_name, flags in tests_to_run.items():
             if args.show_status:
                 # Print status for debug run
                 status_msg = f"[STATUS] Running Debug {test_name} with {os.path.basename(DEBUG_BUILD) if DEBUG_BUILD else 'N/A'}..."
@@ -530,16 +520,14 @@ def main():
                 cmp_status = "N/A"
                 if test_name in GREP_VARIANTS and grep_tool:
                     grep_flags = GREP_VARIANTS[test_name]
+                    grep_result = run_grep_perf_test(grep_flags, test_name, args.show_status)
+                    # Show comparison status
                     if args.show_status:
                         print(
-                            f"[STATUS] Running {test_name} with {grep_tool}...",
+                            f"\r{' ' * 120}\r[STATUS] Comparing {test_name} outputs...",
                             end="",
                             flush=True,
                         )
-                    grep_result = run_grep_perf_test(grep_flags, test_name, False)
-                    # Clear any remaining status line before comparison
-                    if args.show_status:
-                        print(f"\r{' ' * 120}\r", end="", flush=True)
                     cmp_status = compare_outputs(
                         RELEASE_BUILD, flags, test_name, grep_flags
                     )
@@ -548,8 +536,24 @@ def main():
                 if args.show_status:
                     print(f"\r{' ' * 120}\r", end="", flush=True)
 
+                # Calculate ratio (Release OLM / Grep)
+                ratio = 0
+                try:
+                    if grep_result != "N/A" and grep_result != "ERR" and grep_result != "Inf":
+                        release_val = float(release_result) if release_result not in ["N/A", "ERR", "Inf"] else 0
+                        grep_val = float(grep_result) if grep_result not in ["N/A", "ERR", "Inf"] else 0
+                        if grep_val > 0:
+                            ratio = release_val / grep_val
+                            ratio_str = f"{ratio:.2f}x"
+                        else:
+                            ratio_str = "N/A"
+                    else:
+                        ratio_str = "N/A"
+                except (ValueError, ZeroDivisionError):
+                    ratio_str = "N/A"
+
                 print(
-                    f"{test_name:56} | {debug_result:12} | {release_result:12} | {grep_result:12} | {cmp_status:8}"
+                    f"{test_name:56} | {debug_result:12} | {release_result:12} | {grep_result:12} | {ratio_str:8} | {cmp_status:8}"
                 )
                 writer.writerow(
                     [
@@ -558,6 +562,7 @@ def main():
                         debug_result,
                         release_result,
                         grep_result,
+                        ratio,
                         cmp_status,
                     ]
                 )
@@ -566,7 +571,7 @@ def main():
     if args.no_grep:
         print("-" * 85)
     else:
-        print("-" * 113)
+        print("-" * 130)
 
     print(f"[INFO] Performance test completed. Results saved to {CSV_FILE}.")
 
