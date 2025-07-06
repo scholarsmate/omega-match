@@ -847,8 +847,10 @@ core_match(const omega_list_matcher_t *restrict matcher,
           if (short_matcher_query2_fast(sm, h_ptr)) {
             const bool word_boundary_ok = !word_boundary || !IS_WORD(haystack[pos + 2]);
             const bool word_suffix_ok = !word_suffix || (pos + 2 >= hsize || !IS_WORD(haystack[pos + 2]));
+            const bool line_end_ok = !line_end || is_at_line_end(haystack, (size_t)hsize, pos, 2);
             
-            if (word_boundary_ok && word_prefix_ok && word_suffix_ok) {
+            if (word_boundary_ok && word_prefix_ok && word_suffix_ok && 
+                      line_start_ok && line_end_ok) {
               ++total_hits;
               append_match(local, &(omega_match_result_t){
                                       .offset = pos, .len = 2, .match = h_ptr});
@@ -863,8 +865,10 @@ core_match(const omega_list_matcher_t *restrict matcher,
           if (short_matcher_query1_fast(sm, *h_ptr)) {
             const bool word_boundary_ok = !word_boundary || (pos + 1 >= hsize || !IS_WORD(haystack[pos + 1]));
             const bool word_suffix_ok = !word_suffix || (pos + 1 >= hsize || !IS_WORD(haystack[pos + 1]));
+            const bool line_end_ok = !line_end || is_at_line_end(haystack, (size_t)hsize, pos, 1);
             
-            if (word_boundary_ok && word_prefix_ok && word_suffix_ok) {
+            if (word_boundary_ok && word_prefix_ok && word_suffix_ok && 
+                      line_start_ok && line_end_ok) {
               ++total_hits;
               append_match(local, &(omega_match_result_t){
                                       .offset = pos, .len = 1, .match = h_ptr});
