@@ -305,7 +305,7 @@ int main(const int argc, char *argv[]) {
   // Parse the subcommand options
   optind = 1;
   int opt;
-  while ((opt = getopt_long(new_argc, new_argv, "vt:C:", long_opts, NULL)) !=
+  while ((opt = getopt_long(new_argc, new_argv, "vo:t:C:", long_opts, NULL)) !=
          -1) {
     switch (opt) {
     case 'h':
