@@ -102,9 +102,159 @@ cpack -G RPM --config build-gcc-release/CPackConfig.cmake
 cpack -G WIX --config build-msvc-release/CPackConfig.cmake
 ```
 
+## Performance Testing
+
+OmegaMatch includes a comprehensive performance testing suite (`perf_test.py`) that benchmarks the library against grep-like tools when available. The test suite provides detailed performance metrics and correctness validation across multiple matching scenarios.
+
+### Running Performance Tests
+
+```sh
+# Run all tests with status messages
+python perf_test.py --show-status
+
+# Run specific tests only
+python perf_test.py --tests baseline,ignore-case,word-boundary --show-status
+
+# Run without grep comparisons (useful on systems without grep)
+python perf_test.py --no-grep --show-status
+
+# List all available tests
+python perf_test.py --tests list
+```
+
+### Test Results Overview
+
+The performance test suite benchmarks many different matching scenarios with grep comparison where possible:
+
+```sh
+PS D:\GitHub\omega-match> python3.exe .\perf_test.py --show-status
+[INFO] Running all 21 tests
+[INFO] Debug binary: ./build-msvc-debug/Debug/olm.exe
+[INFO] Release binary: ./build-msvc-release/Release/olm.exe
+[INFO] Using `bash-grep` for grep comparisons
+[INFO] Status messages enabled
+[INFO] Status messages enabled
+
+Test Case                                                | Debug MB/s   | Release MB/s | Grep MB/s    | Ratio    | Compare   
+----------------------------------------------------------------------------------------------------------------------------------
+baseline                                                 | 4262.54      | 7992.79      | N/A          | N/A      | N/A       
+ignore-case                                              | 999.67       | 2360.44      | N/A          | N/A      | N/A       
+ignore-case+ignore-punct                                 | 1024.10      | 2505.49      | N/A          | N/A      | N/A       
+ignore-case+ignore-punct+word-boundary                   | 3724.81      | 7920.60      | N/A          | N/A      | N/A       
+ignore-case+ignore-punct+word-boundary+elide-whitespace  | 3610.58      | 7235.59      | N/A          | N/A      | N/A       
+ignore-case+no-overlap+longest                           | 1415.09      | 3004.38      | 210.29       | 14.29x   | OK        
+ignore-case+word-boundary                                | 4096.64      | 8924.43      | 159.52       | 55.95x   | OK        
+ignore-punct                                             | 3052.42      | 5951.75      | N/A          | N/A      | N/A       
+line-end                                                 | 4872.53      | 9001.35      | 202.84       | 44.38x   | OK        
+line-end+ignore-case                                     | 3960.01      | 6336.87      | 12.49        | 507.36x  | OK      
+line-end+word-boundary                                   | 6579.95      | 11171.08     | 123.27       | 90.62x   | OK      
+line-start                                               | 4063.12      | 8557.74      | 118.76       | 72.06x   | OK      
+line-start+ignore-case                                   | 3418.66      | 6281.00      | 111.12       | 56.52x   | OK      
+line-start+line-end                                      | 4793.94      | 7988.92      | 102.85       | 77.68x   | OK      
+line-start+line-end+word-boundary                        | 6493.66      | 11275.96     | 98.32        | 114.69x  | OK      
+longest+no-overlap                                       | 3845.69      | 7578.93      | 8696.32      | 0.87x    | OK      
+longest+no-overlap+word-boundary                         | 6119.62      | 10660.46     | 9420.41      | 1.13x    | OK      
+no-overlap+word-boundary                                 | 6504.39      | 9852.67      | N/A          | N/A      | N/A     
+word-boundary                                            | 6071.29      | 9641.10      | N/A          | N/A      | N/A     
+word-prefix                                              | 3499.79      | 6377.13      | N/A          | N/A      | N/A     
+word-suffix                                              | 3906.00      | 7703.24      | N/A          | N/A      | N/A     
+----------------------------------------------------------------------------------------------------------------------------------
+[INFO] Performance test completed. Results saved to ./perf_results.csv.
+```
+
+### Understanding the Results
+
+**Columns:**
+- **Test Case**: The matching scenario being tested
+- **Debug MB/s**: Throughput using debug build (MB/s)
+- **Release MB/s**: Throughput using release build (MB/s)  
+- **Grep MB/s**: Throughput using grep/grep-like tool (MB/s)
+- **Ratio**: Performance ratio (Release OLM ÷ Grep)
+- **Compare**: Correctness validation (`OK` means identical results)
+
+**Performance Ratio Interpretation:**
+- **1.0x**: Equivalent performance
+- **>1.0x**: OmegaMatch is faster (e.g., `15.48x` = 15× faster)
+- **<1.0x**: Grep is faster (e.g., `0.82x` = grep is 1.2× faster)
+
+### Test Data
+
+The performance tests use realistic datasets:
+- **Patterns**: `data/names.txt` (surnames list, ~2,000 patterns)
+- **Haystack**: `data/kjv.txt` (King James Bible, ~4MB text)
+- **Workload**: Multi-threaded pattern matching with various options
+
+### Targeted Testing
+
+Run specific test categories:
+
+```sh
+# Test basic string matching performance
+python perf_test.py --tests baseline,ignore-case,word-boundary
+
+# Test line anchor performance (OmegaMatch's strength)
+python perf_test.py --tests line-start,line-end,line-start+line-end
+
+# Test word boundary variations
+python perf_test.py --tests word-boundary,longest+word-boundary,no-overlap+word-boundary
+
+# Test advanced combinations
+python perf_test.py --tests ignore-case+word-boundary,longest+no-overlap+word-boundary
+```
+
+### Cross-Platform Testing
+
+The test suite works across platforms:
+- **Windows**: Uses `bash-grep` (Git Bash) or PowerShell-based grep
+- **Linux**: Uses native `grep` command
+- **macOS**: Uses BSD `grep` command
+- **No grep**: Gracefully falls back to OmegaMatch-only benchmarking
+
+Results are saved to `perf_results.csv` for further analysis and plotting.
+
+### Performance Visualization
+
+OmegaMatch includes Gnuplot scripts to create publication-quality performance charts from the test results:
+
+```sh
+# Run performance tests (creates perf_results.csv, used by perf_plot.gp)
+python perf_test.py --show-status
+
+# Generate performance chart (requires gnuplot)
+gnuplot perf_plot.gp
+```
+
+This creates `perf_results.png` with a comprehensive performance comparison chart:
+
+![Performance Chart - Using WSL (Ubuntu 24.04.2 LTS) grep](images/perf_results-wsl.png)
+
+You can also create focused charts for specific test categories:
+
+```sh
+# Create chart for grep-comparable tests only using git bash on a Windows 11 Pro "Dev Drive"
+python.exe perf_test.py --show-status --tests ignore-case+no-overlap+longest,ignore-case+word-boundary,line-end,line-end+ignore-case,line-end+word-boundary,line-start,line-start+ignore-case,line-start+line-end,line-start+line-end+word-boundary,longest+no-overlap,longest+no-overlap+word-boundary
+
+# Run gnuplot in WSL
+gnuplot perf_plot.gp
+```
+
+![Performance Chart - Core Tests](images/perf_results-git_bash.png)
+
+**Chart Features:**
+- **Side-by-side bars** comparing OmegaMatch Release vs Grep performance
+- **Logarithmic scale** to handle wide performance ranges (0.1x to 500x+)
+- **Color coding** to distinguish OmegaMatch (blue) vs Grep (orange) results
+- **Automatic scaling** based on available test data
+- **Publication quality** suitable for papers, presentations, and documentation
+
+**Requirements:**
+- **Gnuplot 5.0+** installed
+- Performance test results in `perf_results.csv`
+- The script automatically handles missing grep data (N/A values)
+
 ## Profile Guided Optimization (PGO) Builds
 
-OmegaMatch supports Profile Guided Optimization (PGO) for maximum performance. PGO builds can provide **5-20% better performance** than standard builds by optimizing based on real-world usage patterns.
+OmegaMatch supports Profile Guided Optimization (PGO) for maximum performance. PGO builds can provide and additional **5-20% better performance** than standard builds by optimizing based on real-world usage patterns.
 
 ### Quick Start - PGO Builds
 
