@@ -1,0 +1,6 @@
+{
+  "rust-analyzer.linkedProjects": [
+    "${workspaceFolder}/bindings/rust/Cargo.toml",
+    "${workspaceFolder}/examples/rust/Cargo.toml"
+  ]
+}
