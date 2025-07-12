@@ -1,0 +1,51 @@
+name: OLM Rust CI
+on:
+  push:
+    branches: ["olm-rust-lib"]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential ninja-build libomp-dev rpm
+
+      - name: Configure CMake
+        run: |
+          if [ -f CMakePresets.json ]; then
+            echo " == CMakePresets file does infact exist!"
+            cmake --preset release
+          else
+            cmake -S . -B build-gcc-release -DCMAKE_BUILD_TYPE=Release
+          fi
+        shell: bash
+
+      - name: Build
+        run: |
+          if [ -f CMakePresets.json ]; then
+            echo " == CMakePresets file does infact exist!"
+            cmake --build --preset release
+          else
+            cmake --build build-gcc-release
+          fi
+        shell: bash
+
+      - name: Install c-lib To Rust Directory
+        run: |
+          mkdir -p ./bindings/rust/lib
+          cp build-gcc-release/libomega_match_static.a bindings/rust/lib
+
+      - name: Build OLM-Rust
+        run: |
+          cd bindings/rust
+          cargo build
+        shell: bash
+
+      - name: Run OLM-Rust Tests
+        run: |
+          cd bindings/rust
+          cargo test
