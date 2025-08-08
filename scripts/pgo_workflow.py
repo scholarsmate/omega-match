@@ -149,7 +149,7 @@ def copy_pgort_dll_to_output(build_dir: Path) -> None:
         return
     # Try to find VCToolsInstallDir from environment
     vc_tools_dir = os.environ.get("VCToolsInstallDir")
-    candidate_paths = []
+    candidate_paths: List[Path] = []
     if vc_tools_dir:
         candidate_paths.append(
             Path(vc_tools_dir) / "bin" / "Hostx64" / "x64" / dll_name

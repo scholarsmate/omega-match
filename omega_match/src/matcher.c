@@ -258,6 +258,21 @@ static uint64_t scan_bucket_and_append(
 #define OFFSET_BYTES ((int)sizeof(size_t))
 #define PASSES (OFFSET_BYTES + (int)sizeof(uint32_t))
 
+/*
+ * Radix sort ordering rationale
+ * --------------------------------
+ * Pass sequence (LSD style, stable per pass):
+ *   passes 0..3   : sort on bytes of ~len   (in effect, length DESC overall)
+ *   remaining     : sort on bytes of offset (offset ASC overall)
+ * Because later passes are more significant, the final ordering is:
+ *   PRIMARY  : offset ascending
+ *   SECONDARY: length descending (longest first for each starting offset)
+ * This guarantees:
+ *   - O(n) longest-only filter: keep first match per offset (already longest)
+ *   - O(n) no-overlap filter  : single forward scan comparing only to last kept
+ * Changing the ordering would either require extra bookkeeping or a second
+ * grouping phase, so we retain this structure for minimal post-filter cost.
+ */
 static void radix_sort_matches(const match_vector_t *restrict mv) {
   const size_t n = mv->count;
   if (unlikely(n < 2)) {
