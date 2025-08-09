@@ -1,6 +1,6 @@
-# OmegaMatch — High-Throughput Multi‑Pattern Text Matching Engine (Apache 2.0)
+# OmegaMatch — High-Throughput Multi‑Pattern Text Matching Engine
 
-OmegaMatch is a fast, embeddable, multi‑pattern exact matcher for products and platforms that need to scan large text streams against thousands of patterns **in real time**. It couples a memory‑mapped compiled pattern store with cache‑efficient data structures, multi‑threaded execution (OpenMP), and optional normalization (case‑insensitive, punctuation‑ignoring, whitespace‑eliding) — all in a lean Apache 2.0 licensed package.
+OmegaMatch is a fast, embeddable, multi‑pattern exact matcher for products and platforms that need to scan large text streams against thousands of patterns **in near real time**. It couples a memory‑mapped compiled pattern store with cache‑efficient data structures, multi‑threaded execution (OpenMP), and optional normalization (case‑insensitive, punctuation‑ignoring, whitespace‑eliding) — all in a lean Apache 2.0 licensed package.
 
 > Build search, compliance, moderation, enrichment, deduplication, or security pipelines that must never become the bottleneck.
 
