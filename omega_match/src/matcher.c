@@ -51,6 +51,7 @@ static inline void omp_set_schedule(int kind, int chunk_size) {
 #include "omega/details/attr.h"
 #include "omega/details/bloom.h"
 #include "omega/details/common.h"
+#include "omega/details/attr.h"
 #include "omega/details/hash_table.h"
 #include "omega/details/match_vector.h"
 #include "omega/details/transform_table.h"
@@ -612,8 +613,8 @@ finalize_match_results(match_vector_t **restrict thread_matches,
   }
 
   // On-merge filtering state
-  size_t last_offset = (size_t)-1;
-  size_t last_end = 0;
+  uint64_t last_offset = (uint64_t)-1;
+  uint64_t last_end = 0;
 
   // Merge loop
   while (active > 0) {
@@ -633,7 +634,7 @@ finalize_match_results(match_vector_t **restrict thread_matches,
       append_match(&merged, cur);
       last_offset = cur->offset;
       if (no_overlap) {
-        size_t end = cur->offset + cur->len;
+        uint64_t end = cur->offset + cur->len;
         if (end > last_end) last_end = end;
       }
     }

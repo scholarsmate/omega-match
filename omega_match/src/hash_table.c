@@ -51,11 +51,13 @@ static inline int olm_cpu_supports_avx2(void) {
 }
 #else
 #include <cpuid.h>
+#if defined(__GNUC__) && !defined(__APPLE__)
 static inline unsigned long long olm_read_xcr0(void) {
   unsigned int eax, edx;
   __asm__ volatile ("xgetbv" : "=a"(eax), "=d"(edx) : "c"(0));
   return ((unsigned long long)edx << 32) | eax;
 }
+#endif
 static inline int olm_cpu_supports_avx2(void) {
   static int cached = -1;
   if (cached != -1) return cached;
@@ -66,7 +68,10 @@ static inline int olm_cpu_supports_avx2(void) {
   const int osxsave = (ecx & (1u << 27)) != 0;
   const int avx = (ecx & (1u << 28)) != 0;
   if (!(osxsave && avx)) { cached = 0; return cached; }
-  unsigned long long xcr0 = olm_read_xcr0();
+  unsigned long long xcr0 = 0ULL;
+#if defined(__GNUC__) && !defined(__APPLE__)
+  xcr0 = olm_read_xcr0();
+#endif
   if ((xcr0 & 0x6ULL) != 0x6ULL) { cached = 0; return cached; }
   if (maxId >= 7) {
     unsigned int eax7, ebx7, ecx7, edx7;
@@ -80,11 +85,13 @@ static inline int olm_cpu_supports_avx2(void) {
 #endif
 #else
 #include <cpuid.h>
+#if defined(__GNUC__) && !defined(__APPLE__)
 static inline unsigned long long olm_read_xcr0(void) {
   unsigned int eax, edx;
   __asm__ volatile ("xgetbv" : "=a"(eax), "=d"(edx) : "c"(0));
   return ((unsigned long long)edx << 32) | eax;
 }
+#endif
 static inline int olm_cpu_supports_avx2(void) {
   static int cached = -1;
   if (cached != -1) return cached;
@@ -95,7 +102,10 @@ static inline int olm_cpu_supports_avx2(void) {
   const int osxsave = (ecx & (1u << 27)) != 0;
   const int avx = (ecx & (1u << 28)) != 0;
   if (!(osxsave && avx)) { cached = 0; return cached; }
-  unsigned long long xcr0 = olm_read_xcr0();
+  unsigned long long xcr0 = 0ULL;
+#if defined(__GNUC__) && !defined(__APPLE__)
+  xcr0 = olm_read_xcr0();
+#endif
   if ((xcr0 & 0x6ULL) != 0x6ULL) { cached = 0; return cached; }
   if (maxId >= 7) {
     unsigned int eax7, ebx7, ecx7, edx7;
@@ -205,7 +215,7 @@ void hash_table_resize(hash_table_t *restrict table) {
   // used count remains the same
 }
 
-#if defined(_M_ARM64) || defined(__aarch64__) || defined(__ARM_NEON)
+#if defined(_M_ARM64) || defined(__aarch64__)
 #include <arm_neon.h>
 #endif
 
@@ -305,7 +315,7 @@ int probe_bucket(const uint8_t *restrict control_bytes,
       }
     }
     return 0;
-#elif defined(_M_ARM64) || defined(__aarch64__) || defined(__ARM_NEON)
+#elif defined(_M_ARM64) || defined(__aarch64__)
     {
       const uint8_t cand_fp = (uint8_t)((hash_uint32(cand) >> 24) | 1u);
       const uint8x16_t rep16 = vdupq_n_u8(cand_fp);

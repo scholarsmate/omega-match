@@ -200,7 +200,7 @@ endif()
 # Common library configuration (OpenMP, warnings, etc.)
 # ---------------------------------------------------------------------------
 
-# Find OpenMP (always required)
+# Find OpenMP (prefer, but allow building without it)
 # On macOS, help CMake find libomp (which is keg-only in Homebrew)
 if (APPLE)
     # Set explicit paths for macOS Homebrew libomp (keg-only package)
@@ -233,13 +233,23 @@ if (APPLE)
     endif()
 endif()
 
-find_package(OpenMP REQUIRED)
+# Try to find OpenMP; allow building without it (single-threaded)
+find_package(OpenMP)
+if (OpenMP_C_FOUND)
+    message(STATUS "OpenMP found: enabling parallel matching")
+    set(HAVE_OPENMP TRUE)
+else()
+    message(WARNING "OpenMP not found; building without OpenMP (single-threaded mode)")
+    set(HAVE_OPENMP FALSE)
+endif()
 
 # Helper macro to avoid code duplication
 macro(configure_omega_match_target target_name)
-    # Always link OpenMP (required dependency)
-    target_link_libraries(${target_name} PUBLIC OpenMP::OpenMP_C)
-    target_compile_definitions(${target_name} PUBLIC OMEGA_MATCH_USE_OPENMP=1)
+    # Link OpenMP when available; otherwise compile without it
+    if (HAVE_OPENMP)
+        target_link_libraries(${target_name} PUBLIC OpenMP::OpenMP_C)
+        target_compile_definitions(${target_name} PUBLIC OMEGA_MATCH_USE_OPENMP=1)
+    endif()
 
     # Compiler-specific warnings
     if (MSVC)
@@ -282,8 +292,10 @@ if (OMEGA_MATCH_BUILD_CLI)
     target_link_libraries(olm PRIVATE omega_match_static)
     target_compile_features(olm PRIVATE c_std_17)
 
-    # Always link OpenMP for CLI tool (required dependency)
-    target_link_libraries(olm PRIVATE OpenMP::OpenMP_C)
+    # Link OpenMP for CLI tool when available
+    if (HAVE_OPENMP)
+        target_link_libraries(olm PRIVATE OpenMP::OpenMP_C)
+    endif()
 
     install(TARGETS olm RUNTIME DESTINATION bin)
 
