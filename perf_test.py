@@ -19,6 +19,7 @@ import csv
 import shutil
 import argparse
 from pathlib import Path
+from typing import Optional, List
 
 # Config
 PATTERNS = "./data/names.txt"
@@ -120,7 +121,7 @@ def generate_haystack():
         )
 
 
-def run_perf_test(binary, flags, show_status=False, test_name=""):
+def run_perf_test(binary: Optional[str], flags: str, show_status: bool = False, test_name: str = "") -> str:
     if not binary or not os.path.isfile(binary):
         return "ERR (binary not found)"
 
@@ -131,7 +132,7 @@ def run_perf_test(binary, flags, show_status=False, test_name=""):
             flush=True,
         )
 
-    cmd = [binary, "match"] + flags.split() + [PATTERNS, HAYSTACK]
+    cmd: List[str] = [binary, "match"] + flags.split() + [PATTERNS, HAYSTACK]  # type: ignore[list-item]
     start = time.perf_counter()
     try:
         subprocess.run(
@@ -150,7 +151,7 @@ def run_perf_test(binary, flags, show_status=False, test_name=""):
     return f"{mb_per_sec:.2f}"
 
 
-def detect_grep_tool():
+def detect_grep_tool() -> Optional[str]:
     """Detect available grep-like tools and return the best one."""
     # Check for direct grep first (Linux/Unix/WSL)
     if shutil.which("grep"):
@@ -171,7 +172,7 @@ def detect_grep_tool():
     return None
 
 
-def build_grep_command(tool, grep_flags, pattern_file, haystack, test_name):
+def build_grep_command(tool: str, grep_flags: str, pattern_file: str, haystack: str, test_name: str) -> Optional[List[str]]:
     """Build command for different grep-like tools."""
     if tool == "grep":
         return ["grep"] + grep_flags.split() + ["-f", pattern_file, haystack]
@@ -182,7 +183,7 @@ def build_grep_command(tool, grep_flags, pattern_file, haystack, test_name):
     return None
 
 
-def run_grep_perf_test(grep_flags, test_name, show_status=False):
+def run_grep_perf_test(grep_flags: str, test_name: str, show_status: bool = False) -> str:
 
     tool = detect_grep_tool()
     if not tool:
@@ -226,6 +227,7 @@ def run_grep_perf_test(grep_flags, test_name, show_status=False):
                         temp_pattern_file.write(line + "\n")  # Use explicit Unix line ending
             pattern_file = temp_filename
 
+    cmd: Optional[List[str]] = None
     try:
         cmd = build_grep_command(tool, grep_flags, pattern_file, HAYSTACK, test_name)
         if not cmd:
@@ -255,17 +257,17 @@ def run_grep_perf_test(grep_flags, test_name, show_status=False):
             os.unlink(pattern_file)
 
 
-def normalize(path):
+def normalize(path: str) -> str:
     with open(path, "r", encoding="utf-8") as f:
         return f.read().replace("\r\n", "\n").replace("\r", "\n")
 
 
-def compare_outputs(release_build, flags, test_name, grep_flags=None):
+def compare_outputs(release_build: str, flags: str, test_name: str, grep_flags: Optional[str] = None) -> str:
     # Run release build and save output
     olm_out = "olm_out.txt"
     grep_out = "grep_out.txt"
     with open(olm_out, "w", encoding="utf-8") as f:
-        cmd = [release_build, "match"] + flags.split() + [PATTERNS, HAYSTACK]
+        cmd: List[str] = [release_build, "match"] + flags.split() + [PATTERNS, HAYSTACK]
         subprocess.run(cmd, stdout=f, stderr=subprocess.DEVNULL, check=True)
 
     # Run grep and save output
@@ -305,13 +307,13 @@ def compare_outputs(release_build, flags, test_name, grep_flags=None):
             pattern_file = temp_filename
 
         try:
-            cmd = build_grep_command(
+            cmd2: Optional[List[str]] = build_grep_command(
                 tool, grep_flags, pattern_file, HAYSTACK, test_name
             )
-            if cmd:
+            if cmd2:
                 with open(grep_out, "w", encoding="utf-8") as f:
                     subprocess.run(
-                        cmd, stdout=f, stderr=subprocess.DEVNULL, check=False
+                        cmd2, stdout=f, stderr=subprocess.DEVNULL, check=False
                     )
         finally:
             # Clean up temporary files
@@ -391,6 +393,24 @@ Examples:
     )
 
     parser.add_argument(
+        "--no-debug",
+        action="store_true",
+        help="Skip running debug binary benchmarks",
+    )
+
+    parser.add_argument(
+        "--release-binary",
+        type=str,
+        help="Explicit path to release/optimized olm binary to benchmark (overrides auto-detect)",
+    )
+
+    parser.add_argument(
+        "--debug-binary",
+        type=str,
+        help="Explicit path to debug olm binary to benchmark (overrides auto-detect)",
+    )
+
+    parser.add_argument(
         "--show-status",
         action="store_true",
         help="Show status messages indicating which tests are currently running",
@@ -432,14 +452,23 @@ def main():
 
     generate_haystack()
 
-    # Show binary detection results
-    if DEBUG_BUILD:
-        print(f"[INFO] Debug binary: {DEBUG_BUILD}")
-    else:
-        print("[WARNING] Debug binary not found")
+    # Optional binary overrides (use locals to avoid reassigning module constants)
+    debug_bin = DEBUG_BUILD
+    release_bin = RELEASE_BUILD
+    if args.release_binary:
+        release_bin = args.release_binary
+    if args.debug_binary is not None:
+        debug_bin = args.debug_binary
 
-    if RELEASE_BUILD:
-        print(f"[INFO] Release binary: {RELEASE_BUILD}")
+    # Show binary detection results
+    if not args.no_debug:
+        if debug_bin:
+            print(f"[INFO] Debug binary: {debug_bin}")
+        else:
+            print("[WARNING] Debug binary not found")
+
+    if release_bin:
+        print(f"[INFO] Release binary: {release_bin}")
     else:
         print("[WARNING] Release binary not found")
 
@@ -463,49 +492,77 @@ def main():
 
     # Adjust table headers based on whether grep is enabled
     if args.no_grep:
-        print(f"{'Test Case':56} | {'Debug MB/s':12} | {'Release MB/s':12}")
-        print("-" * 85)
+        if args.no_debug:
+            print(f"{'Test Case':56} | {'Release MB/s':12}")
+            print("-" * 73)
+        else:
+            print(f"{'Test Case':56} | {'Debug MB/s':12} | {'Release MB/s':12}")
+            print("-" * 85)
     else:
-        print(
-            f"{'Test Case':56} | {'Debug MB/s':12} | {'Release MB/s':12} | {'Grep MB/s':12} | {'Ratio':8} | {'Compare':8}"
-        )
-        print("-" * 130)
+        if args.no_debug:
+            print(
+                f"{'Test Case':56} | {'Release MB/s':12} | {'Grep MB/s':12} | {'Ratio':8} | {'Compare':8}"
+            )
+            print("-" * 118)
+        else:
+            print(
+                f"{'Test Case':56} | {'Debug MB/s':12} | {'Release MB/s':12} | {'Grep MB/s':12} | {'Ratio':8} | {'Compare':8}"
+            )
+            print("-" * 130)
 
     with open(CSV_FILE, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.writer(csvfile)
         if args.no_grep:
-            writer.writerow(["test_case", "threads", "debug_mb_s", "release_mb_s"])
+            if args.no_debug:
+                writer.writerow(["test_case", "threads", "release_mb_s"])
+            else:
+                writer.writerow(["test_case", "threads", "debug_mb_s", "release_mb_s"])
         else:
-            writer.writerow(
-                [
-                    "test_case",
-                    "threads",
-                    "debug_mb_s",
-                    "release_mb_s",
-                    "grep_mb_s",
-                    "release_grep_ratio",
-                    "compare_status",
-                ]
-            )
+            if args.no_debug:
+                writer.writerow(
+                    [
+                        "test_case",
+                        "threads",
+                        "release_mb_s",
+                        "grep_mb_s",
+                        "release_grep_ratio",
+                        "compare_status",
+                    ]
+                )
+            else:
+                writer.writerow(
+                    [
+                        "test_case",
+                        "threads",
+                        "debug_mb_s",
+                        "release_mb_s",
+                        "grep_mb_s",
+                        "release_grep_ratio",
+                        "compare_status",
+                    ]
+                )
 
         for test_name, flags in tests_to_run.items():
-            if args.show_status:
-                # Print status for debug run
-                status_msg = f"[STATUS] Running Debug {test_name} with {os.path.basename(DEBUG_BUILD) if DEBUG_BUILD else 'N/A'}..."
-                print(status_msg, end="", flush=True)
-            debug_result = run_perf_test(
-                DEBUG_BUILD, flags, False, f"Debug {test_name}"
-            )
+            if not args.no_debug:
+                if args.show_status:
+                    # Print status for debug run
+                    status_msg = f"[STATUS] Running Debug {test_name} with {os.path.basename(debug_bin) if debug_bin else 'N/A'}..."
+                    print(status_msg, end="", flush=True)
+                debug_result = run_perf_test(
+                    debug_bin, flags, False, f"Debug {test_name}"
+                )
+            else:
+                debug_result = "N/A"
 
             if args.show_status:
                 # Clear and print status for release run
                 print(
-                    f"\r{' ' * 120}\r[STATUS] Running Release {test_name} with {os.path.basename(RELEASE_BUILD) if RELEASE_BUILD else 'N/A'}...",
+                    f"\r{' ' * 120}\r[STATUS] Running Release {test_name} with {os.path.basename(release_bin) if release_bin else 'N/A'}...",
                     end="",
                     flush=True,
                 )
             release_result = run_perf_test(
-                RELEASE_BUILD, flags, False, f"Release {test_name}"
+                release_bin, flags, False, f"Release {test_name}"
             )
 
             # Clear any remaining status line before printing the table row
@@ -513,8 +570,12 @@ def main():
                 print(f"\r{' ' * 120}\r", end="", flush=True)
 
             if args.no_grep:
-                print(f"{test_name:56} | {debug_result:12} | {release_result:12}")
-                writer.writerow([test_name, OMP_THREADS, debug_result, release_result])
+                if args.no_debug:
+                    print(f"{test_name:56} | {release_result:12}")
+                    writer.writerow([test_name, OMP_THREADS, release_result])
+                else:
+                    print(f"{test_name:56} | {debug_result:12} | {release_result:12}")
+                    writer.writerow([test_name, OMP_THREADS, debug_result, release_result])
             else:
                 grep_result = "N/A"
                 cmp_status = "N/A"
@@ -528,9 +589,10 @@ def main():
                             end="",
                             flush=True,
                         )
-                    cmp_status = compare_outputs(
-                        RELEASE_BUILD, flags, test_name, grep_flags
-                    )
+                    if release_bin:
+                        cmp_status = compare_outputs(
+                            release_bin, flags, test_name, grep_flags
+                        )
 
                 # Clear any remaining status line before printing the table row
                 if args.show_status:
@@ -552,26 +614,47 @@ def main():
                 except (ValueError, ZeroDivisionError):
                     ratio_str = "N/A"
 
-                print(
-                    f"{test_name:56} | {debug_result:12} | {release_result:12} | {grep_result:12} | {ratio_str:8} | {cmp_status:8}"
-                )
-                writer.writerow(
-                    [
-                        test_name,
-                        OMP_THREADS,
-                        debug_result,
-                        release_result,
-                        grep_result,
-                        ratio,
-                        cmp_status,
-                    ]
-                )
+                if args.no_debug:
+                    print(
+                        f"{test_name:56} | {release_result:12} | {grep_result:12} | {ratio_str:8} | {cmp_status:8}"
+                    )
+                    writer.writerow(
+                        [
+                            test_name,
+                            OMP_THREADS,
+                            release_result,
+                            grep_result,
+                            ratio,
+                            cmp_status,
+                        ]
+                    )
+                else:
+                    print(
+                        f"{test_name:56} | {debug_result:12} | {release_result:12} | {grep_result:12} | {ratio_str:8} | {cmp_status:8}"
+                    )
+                    writer.writerow(
+                        [
+                            test_name,
+                            OMP_THREADS,
+                            debug_result,
+                            release_result,
+                            grep_result,
+                            ratio,
+                            cmp_status,
+                        ]
+                    )
 
     # Adjust footer line based on whether grep is enabled
     if args.no_grep:
-        print("-" * 85)
+        if args.no_debug:
+            print("-" * 73)
+        else:
+            print("-" * 85)
     else:
-        print("-" * 130)
+        if args.no_debug:
+            print("-" * 118)
+        else:
+            print("-" * 130)
 
     print(f"[INFO] Performance test completed. Results saved to {CSV_FILE}.")
 
