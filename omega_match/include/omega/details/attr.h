@@ -40,7 +40,11 @@
 
 // Portable prefetch hint
 #if defined(_MSC_VER)
-#define OLM_PREFETCH(addr) ((void)0)
+#include <intrin.h>
+#ifndef _MM_HINT_T0
+#define _MM_HINT_T0 3
+#endif
+#define OLM_PREFETCH(addr) _mm_prefetch((const char *)(addr), _MM_HINT_T0)
 #else
 #define OLM_PREFETCH(addr) __builtin_prefetch((addr), 0, 1)
 #endif

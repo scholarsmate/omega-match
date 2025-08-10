@@ -76,6 +76,7 @@ struct omega_list_matcher_struct {
   compiled_header_t *header;
   const uint8_t *pattern_store;
   bloom_filter_t bf;
+  const uint8_t *control_bytes; // optional control-byte fingerprint array (v2+)
   const uint32_t *index_array;
   const uint8_t *bucket_data;
   int case_insensitive;
@@ -380,6 +381,14 @@ static int oa_matcher_load(const char *path, omega_list_matcher_t *matcher) {
     return -1;
   }
   offset += HASH_HEADER_SIZE;
+
+  // For version >= 2, a control-byte array (table_size bytes) precedes index array
+  if (hdr->version >= 2) {
+    matcher->control_bytes = (const uint8_t *)(map + offset);
+    offset += hdr->table_size * sizeof(uint8_t);
+  } else {
+    matcher->control_bytes = NULL;
+  }
 
   // 4a. Index array
   matcher->index_array = (const uint32_t *)(map + offset);
@@ -803,7 +812,8 @@ core_match(const omega_list_matcher_t *restrict matcher,
           ++total_filtered;
         } else {
           uint32_t slot_offset;
-          if (!probe_bucket(idx_arr, bucket, table_mask, cand, &slot_offset)) {
+          if (!probe_bucket(matcher->control_bytes, idx_arr, bucket, table_mask,
+                           cand, &slot_offset)) {
             ++total_misses;
           } else {
             ++total_hits;

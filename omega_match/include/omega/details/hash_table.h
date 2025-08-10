@@ -10,7 +10,8 @@
 void hash_table_init(hash_table_t *restrict table, uint32_t initial_size);
 void hash_table_free(const hash_table_t *restrict table);
 void hash_table_resize(hash_table_t *restrict table);
-int probe_bucket(const uint32_t *restrict idx_arr,
+int probe_bucket(const uint8_t *restrict control_bytes,
+                 const uint32_t *restrict idx_arr,
                  const uint8_t *restrict bucket_data, uint32_t table_mask,
                  uint32_t cand, uint32_t *slot_offset);
 void hash_table_insert(hash_table_t *restrict table, uint32_t key,

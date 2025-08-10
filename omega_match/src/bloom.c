@@ -5,6 +5,7 @@
 
 #include "omega/details/bloom.h"
 #include "omega/details/common.h"
+#include "omega/details/attr.h"
 #include "omega/details/hash.h"
 #include "omega/details/util.h"
 
@@ -50,24 +51,8 @@ void bloom_filter_add(const bloom_filter_t *restrict bf, const uint32_t key) {
 
 int bloom_filter_query(const bloom_filter_t *restrict bf, const uint32_t key) {
   const uint32_t h1 = fast_gram_hash(key);
-  const uint32_t h2 = key * 0x9e3779b1;
-  const uint32_t mask = bf->bit_size - 1;
-
-  const uint32_t bitpos0 = (h1)&mask;
-  const uint32_t bitpos1 = (h1 + h2) & mask;
-  const uint32_t bitpos2 = (h1 + 2 * h2) & mask;
-
-  const uint64_t *bits = bf->bits;
-  return ((bits[bitpos0 >> 6] >> (bitpos0 & 63)) & 1) &&
-         ((bits[bitpos1 >> 6] >> (bitpos1 & 63)) & 1) &&
-         ((bits[bitpos2 >> 6] >> (bitpos2 & 63)) & 1);
-}
-
-int bloom_filter_query_2(const bloom_filter_t *restrict bf,
-                         const uint32_t key) {
-  const uint32_t mask = bf->bit_size - 1;
-  const uint32_t h1 = fast_gram_hash(key);
   const uint32_t h2 = key * 0x9e3779b1U; // GOLDEN_RATIO_32
+  const uint32_t mask = bf->bit_size - 1;
 
   const uint32_t bitpos0 = (h1 + 0 * h2) & mask;
   const uint32_t bitpos1 = (h1 + 1 * h2) & mask;
@@ -77,16 +62,24 @@ int bloom_filter_query_2(const bloom_filter_t *restrict bf,
   const uint32_t word1 = bitpos1 >> 6;
   const uint32_t word2 = bitpos2 >> 6;
 
-  const uint64_t mask0 = 1ULL << (bitpos0 & 63);
-  const uint64_t mask1 = 1ULL << (bitpos1 & 63);
-  const uint64_t mask2 = 1ULL << (bitpos2 & 63);
+  const uint64_t m0 = 1ULL << (bitpos0 & 63);
+  const uint64_t m1 = 1ULL << (bitpos1 & 63);
+  const uint64_t m2 = 1ULL << (bitpos2 & 63);
 
-  const uint64_t w0 = bf->bits[word0];
-  const uint64_t w1 = bf->bits[word1];
-  const uint64_t w2 = bf->bits[word2];
+  const uint64_t *restrict bits = bf->bits;
 
-  // Branchless: all masks must match
-  return ((w0 & mask0) && (w1 & mask1) && (w2 & mask2));
+  // Prefetch next likely words to hide latency on large tables.
+  // Safe, best-effort hint; cross-platform via OLM_PREFETCH.
+  OLM_PREFETCH(bits + word0);
+  OLM_PREFETCH(bits + word1);
+  OLM_PREFETCH(bits + word2);
+
+  // Load and test; combine loads if multiple positions share the same word.
+  const uint64_t w0 = bits[word0];
+  const uint64_t w1 = (word1 == word0) ? w0 : bits[word1];
+  const uint64_t w2 = (word2 == word0) ? w0 : (word2 == word1) ? w1 : bits[word2];
+
+  return ((w0 & m0) && (w1 & m1) && (w2 & m2));
 }
 
 // Destroy bloom filter and free resources
