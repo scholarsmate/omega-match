@@ -51,7 +51,6 @@ static inline void omp_set_schedule(int kind, int chunk_size) {
 #include "omega/details/attr.h"
 #include "omega/details/bloom.h"
 #include "omega/details/common.h"
-#include "omega/details/attr.h"
 #include "omega/details/hash_table.h"
 #include "omega/details/match_vector.h"
 #include "omega/details/transform_table.h"
@@ -488,44 +487,7 @@ int omega_list_matcher_destroy(omega_list_matcher_t *restrict matcher) {
   return 0;
 }
 
-// Strategy function type for filtering matches
-typedef int (*match_filter_fn)(const omega_match_result_t *prev,
-                               const omega_match_result_t *curr);
-
-// Generic apply filter: keep matches where filter(prev, curr) is true
-static void apply_filter(match_vector_t *restrict v,
-                         const match_filter_fn filter) {
-  size_t write = 0;
-  for (size_t i = 0; i < v->count; ++i) {
-    if (write == 0 || filter(&v->data[write - 1], &v->data[i])) {
-      v->data[write++] = v->data[i];
-    }
-  }
-  v->count = (uint32_t)write;
-}
-
-// Filter for longest-only: keep only the first occurrence per offset
-OLM_ALWAYS_INLINE static int filter_longest(const omega_match_result_t *prev,
-                                            const omega_match_result_t *curr) {
-  return curr->offset != prev->offset;
-}
-
-// Filter for no-overlap: keep match if it doesn't overlap previous
-OLM_ALWAYS_INLINE static int
-filter_no_overlap(const omega_match_result_t *prev,
-                  const omega_match_result_t *curr) {
-  return (curr->offset >= (prev->offset + prev->len));
-}
-
-// Apply longest-only: keep only the longest match at each offset
-OLM_ALWAYS_INLINE static void apply_longest(match_vector_t *restrict v) {
-  apply_filter(v, filter_longest);
-}
-
-// Apply no-overlap: drop any match that overlaps the previous one
-OLM_ALWAYS_INLINE static void apply_no_overlap(match_vector_t *restrict v) {
-  apply_filter(v, filter_no_overlap);
-}
+// Removed legacy post-merge filter helpers (now handled during k-way merge)
 
 // finalize helper merging thread-local vectors
 // Run descriptor used by k-way merge and its comparator

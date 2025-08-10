@@ -185,11 +185,20 @@ def configure_and_build(
 
     config_cmd = ["cmake", "--preset", preset_name]
 
-    # Add Python executable for cross-platform compatibility
+    # Add Python executable for cross-platform compatibility and require OpenMP for perf builds
     python_exe = sys.executable
-    config_cmd.extend([f"-DPython3_EXECUTABLE={python_exe}"])
+    config_cmd.extend([f"-DPython3_EXECUTABLE={python_exe}", "-DOMEGA_MATCH_REQUIRE_OPENMP=ON"])
 
-    run_command(config_cmd, cwd=project_root)
+    # On macOS runners, hint libomp paths if available
+    if platform_name == "macos":
+        env = os.environ.copy()
+        env.setdefault("LDFLAGS", "-L/opt/homebrew/opt/libomp/lib -L/usr/local/opt/libomp/lib")
+        env.setdefault("CPPFLAGS", "-I/opt/homebrew/opt/libomp/include -I/usr/local/opt/libomp/include")
+        env.setdefault("OpenMP_ROOT", "/opt/homebrew/opt/libomp:/usr/local/opt/libomp")
+        run_command(config_cmd, cwd=project_root, env=env)
+    else:
+        run_command(config_cmd, cwd=project_root)
+
 
     print(f"\n=== Building {preset_name} ===")
 

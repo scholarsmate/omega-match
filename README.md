@@ -32,6 +32,12 @@ cmake --build --preset release
 ctest --preset release --output-on-failure
 ```
 
+If you need the build to fail when OpenMP isn't available (e.g., packaging jobs), enable the hard requirement:
+
+```sh
+cmake --preset release -DOMEGA_MATCH_REQUIRE_OPENMP=ON
+```
+
 ### Language Bindings Build (libraries only)
 ```sh
 cmake --preset release -DOLM_BUILD_CLI=OFF
