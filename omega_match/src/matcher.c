@@ -259,94 +259,6 @@ static uint64_t scan_bucket_and_append(
   return matches;
 }
 
-// --- Radix Sort for Matches ---
-#define OFFSET_BYTES ((int)sizeof(size_t))
-#define PASSES (OFFSET_BYTES + (int)sizeof(uint32_t))
-
-/*
- * Radix sort ordering rationale
- * --------------------------------
- * Pass sequence (LSD style, stable per pass):
- *   passes 0..3   : sort on bytes of ~len   (in effect, length DESC overall)
- *   remaining     : sort on bytes of offset (offset ASC overall)
- * Because later passes are more significant, the final ordering is:
- *   PRIMARY  : offset ascending
- *   SECONDARY: length descending (longest first for each starting offset)
- * This guarantees:
- *   - O(n) longest-only filter: keep first match per offset (already longest)
- *   - O(n) no-overlap filter  : single forward scan comparing only to last kept
- * Changing the ordering would either require extra bookkeeping or a second
- * grouping phase, so we retain this structure for minimal post-filter cost.
- */
-#if defined(__GNUC__)
-__attribute__((unused))
-#endif
-static void radix_sort_matches(const match_vector_t *restrict mv) {
-  const size_t n = mv->count;
-  if (unlikely(n < 2)) {
-    return; // nothing to sort
-  }
-
-  omega_match_result_t *tmp = malloc(n * sizeof(omega_match_result_t));
-  if (unlikely(!tmp)) {
-    ABORT("malloc for radix sort");
-  }
-
-  omega_match_result_t *in = mv->data;
-  omega_match_result_t *out = tmp;
-
-  for (int pass = 0; pass < PASSES; ++pass) {
-    size_t count[256] = {0};
-
-    /* 1. count occurrences of each byte value */
-    for (size_t i = 0; i < n; ++i) {
-      uint8_t key;
-      if (pass < 4) {
-        // First 4 passes: sort by ~len (descending match length)
-        key = (uint8_t)(~in[i].len >> (pass << 3) & 0xFFu);
-      } else {
-        // Remaining passes: sort by offset (ascending match position)
-        key = (uint8_t)(in[i].offset >> ((pass - 4) << 3) & 0xFFu);
-      }
-      ++count[key];
-    }
-
-    /* 2. exclusive prefix sum */
-    size_t sum = 0;
-    for (size_t b = 0; b < 256; ++b) {
-      const size_t c = count[b];
-      count[b] = sum;
-      sum += c;
-    }
-
-    /* 3. scatter */
-    for (size_t i = 0; i < n; ++i) {
-      uint8_t key;
-      if (pass < 4) {
-        // First 4 passes: sort by ~len (descending match length)
-        key = (uint8_t)(~in[i].len >> (pass << 3) & 0xFFu);
-      } else {
-        // Remaining passes: sort by offset (ascending match position)
-        key = (uint8_t)(in[i].offset >> ((pass - 4) << 3) & 0xFFu);
-      }
-      out[count[key]++] = in[i];
-    }
-
-    /* 4. swap roles */
-    omega_match_result_t *tmp_ptr = in;
-    in = out;
-    out = tmp_ptr;
-  }
-
-  // Copy results back to original buffer if needed
-  const int passes = PASSES;
-  if (passes % 2 == 1) {
-    memcpy(mv->data, tmp, n * sizeof(omega_match_result_t));
-  }
-
-  free(tmp);
-}
-
 /*-------------------------------------------------------------*/
 
 static int oa_matcher_load(const char *path, omega_list_matcher_t *matcher) {
@@ -760,8 +672,6 @@ finalize_match_results(match_vector_t **restrict thread_matches,
   free(thread_matches);
   free(heap);
   free(runs);
-
-  (void)0; // keep block structure consistent
 
   // Produce results
   omega_match_results_t *out = (omega_match_results_t *)malloc(sizeof(*out));

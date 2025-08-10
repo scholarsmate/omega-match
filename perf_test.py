@@ -63,21 +63,21 @@ def get_binary_paths():
 
     return debug_build, release_build
 # Cache for binary capability checks
-_quiet_support_cache: dict[str, bool] = {}
+_BINARY_QUIET_SUPPORT_CACHE: dict[str, bool] = {}
 
 def binary_supports_quiet(binary: str) -> bool:
     """Return True if the provided olm binary supports --quiet in match mode."""
     if not binary:
         return False
-    if binary in _quiet_support_cache:
-        return _quiet_support_cache[binary]
+    if binary in _BINARY_QUIET_SUPPORT_CACHE:
+        return _BINARY_QUIET_SUPPORT_CACHE[binary]
     try:
         result = subprocess.run([binary, "match", "--help"], capture_output=True, text=True, timeout=5)
         ok = (result.returncode == 0) and ("--quiet" in result.stdout or "--quiet" in result.stderr)
-        _quiet_support_cache[binary] = ok
+        _BINARY_QUIET_SUPPORT_CACHE[binary] = ok
         return ok
     except Exception:
-        _quiet_support_cache[binary] = False
+        _BINARY_QUIET_SUPPORT_CACHE[binary] = False
         return False
 
 
@@ -156,7 +156,7 @@ def run_perf_test(binary: Optional[str], flags: str, show_status: bool = False, 
     extra: List[str] = []
     if add_quiet and "--quiet" not in flags and binary_supports_quiet(binary):
         extra = ["--quiet"]
-    cmd: List[str] = [binary, "match"] + extra + flags.split() + [PATTERNS, HAYSTACK]  # type: ignore[list-item]
+    cmd: List[str] = [binary, "match"] + extra + flags.split() + [PATTERNS, HAYSTACK]
     start = time.perf_counter()
     try:
         subprocess.run(
