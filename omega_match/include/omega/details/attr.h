@@ -40,7 +40,7 @@
 
 // Portable prefetch hint
 #if defined(_MSC_VER)
-#include <intrin.h>
+#include <immintrin.h>
 #ifndef _MM_HINT_T0
 #define _MM_HINT_T0 3
 #endif

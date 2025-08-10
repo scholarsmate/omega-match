@@ -12,6 +12,7 @@
 
 #if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
 #include <immintrin.h>
+#if defined(_MSC_VER)
 #include <intrin.h>
 static inline int olm_cpu_supports_avx2(void) {
   static int cached = -1;
@@ -37,14 +38,48 @@ static inline int olm_cpu_supports_avx2(void) {
   return cached;
 }
 #else
+#include <cpuid.h>
+static inline unsigned long long olm_read_xcr0(void) {
+  unsigned int eax, edx;
+  // xgetbv
+  __asm__ volatile ("xgetbv" : "=a"(eax), "=d"(edx) : "c"(0));
+  return ((unsigned long long)edx << 32) | eax;
+}
+static inline int olm_cpu_supports_avx2(void) {
+  static int cached = -1;
+  if (cached != -1) return cached;
+  unsigned int eax, ebx, ecx, edx;
+  // Get max basic CPUID leaf
+  if (!__get_cpuid(0, &eax, &ebx, &ecx, &edx)) { cached = 0; return cached; }
+  unsigned int maxId = eax;
+  // Feature flags in leaf 1
+  if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) { cached = 0; return cached; }
+  const int osxsave = (ecx & (1u << 27)) != 0;
+  const int avx = (ecx & (1u << 28)) != 0;
+  if (!(osxsave && avx)) { cached = 0; return cached; }
+  // Verify XCR0 enables XMM (bit 1) and YMM (bit 2)
+  unsigned long long xcr0 = olm_read_xcr0();
+  if ((xcr0 & 0x6ULL) != 0x6ULL) { cached = 0; return cached; }
+  // AVX2 is leaf 7 EBX bit 5
+  if (maxId >= 7) {
+    unsigned int eax7, ebx7, ecx7, edx7;
+    __get_cpuid_count(7, 0, &eax7, &ebx7, &ecx7, &edx7);
+    cached = ((ebx7 & (1u << 5)) != 0);
+    return cached;
+  }
+  cached = 0;
+  return cached;
+}
+#endif
+#else
 static inline int olm_cpu_supports_avx2(void) { return 0; }
 #endif
 
 // --- Hash table parameters ---
+// Hash table load factor (threshold for resizing). Lower to reduce probe chain
+// lengths and improve lookup performance.
 #define INITIAL_HASH_CAPACITY (8192) // Initial capacity for the hash table
-#define LOAD_FACTOR                                                            \
-  (0.70) // Hash table load factor (threshold for resizing). Lower to reduce    \
-         // probe chain lengths and improve lookup performance.
+#define LOAD_FACTOR (0.70)
 
 // Empty slot marker for the fixed index array
 #define EMPTY_SLOT (0xFFFFFFFFu)
@@ -147,7 +182,11 @@ int probe_bucket(const uint8_t *restrict control_bytes,
   if (control_bytes) {
 #if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
     const uint8_t cand_fp = (uint8_t)((hash_uint32(cand) >> 24) | 1u);
-    if (olm_cpu_supports_avx2()) {
+  // Use AVX2 path only if the compiler supports AVX2 intrinsics; otherwise
+  // fall back to the SSE2 path. Runtime check still avoids executing AVX2
+  // on unsupported CPUs when compiled with AVX2.
+#if defined(__AVX2__) || defined(_MSC_VER)
+  if (olm_cpu_supports_avx2()) {
       const __m256i rep32 = _mm256_set1_epi8((char)cand_fp);
       const __m256i zero32 = _mm256_setzero_si256();
       uint32_t probed = 0;
@@ -186,7 +225,9 @@ int probe_bucket(const uint8_t *restrict control_bytes,
         }
         idx = (idx + 32) & table_mask; probed += 32;
       }
-    } else {
+    } else
+#endif
+    {
       const __m128i rep16 = _mm_set1_epi8((char)cand_fp);
       const __m128i zero16 = _mm_setzero_si128();
       uint32_t probed = 0;
