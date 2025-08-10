@@ -541,3 +541,38 @@ endif()
 if (MSVC)
     add_definitions(-D_CRT_SECURE_NO_WARNINGS)
 endif()
+
+# ---------------------------------------------------------------------------
+# Profiling helpers (Callgrind)
+# ---------------------------------------------------------------------------
+if(UNIX)
+    find_program(VALGRIND valgrind)
+    if(VALGRIND)
+        message(STATUS "Valgrind found: ${VALGRIND}")
+        # Run callgrind on a representative workload and write callgrind.out
+        add_custom_target(profile_callgrind
+            COMMAND ${VALGRIND} --tool=callgrind --callgrind-out-file=callgrind.out
+                    $<TARGET_FILE:olm> match
+                    ${CMAKE_CURRENT_SOURCE_DIR}/data/names.txt
+                    ${CMAKE_CURRENT_SOURCE_DIR}/data/kjv.txt
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            DEPENDS olm
+            COMMENT "Running callgrind on olm (names.txt vs kjv.txt)")
+
+        # Summarize a single callgrind file (callgrind.out)
+        add_custom_target(profile_callgrind_report
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/callgrind_report.py callgrind.out
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            DEPENDS profile_callgrind
+            COMMENT "Summarizing callgrind.out with callgrind_report.py")
+
+        # Compare two pre-generated files in repo root (if present)
+        add_custom_target(profile_callgrind_compare
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/callgrind_report.py
+                    callgrind.main.out callgrind.perf_branch.out
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            COMMENT "Comparing callgrind.main.out vs callgrind.perf_branch.out")
+    else()
+        message(STATUS "Valgrind not found; profiling helper targets will be skipped")
+    endif()
+endif()
