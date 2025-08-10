@@ -35,6 +35,12 @@
 #define SHORT_MATCHER_MAGIC "0MG5HOrT"
 #define SHORT_MATCHER_MAGIC_SIZE (8)
 
+// --- Common bit constants ---
+// 0x01 replicated in all 8 bytes (useful for SIMD-like byte tricks in scalar)
+#define BYTE_REPLICATE_64 (0x0101010101010101ULL)
+// 0x80 in each byte position
+#define HIGH_BIT_MASK_64 (0x8080808080808080ULL)
+
 // --- Error Handling Macro ---
 #define ABORT(msg)                                                             \
   do {                                                                         \

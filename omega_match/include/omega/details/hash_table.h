@@ -5,7 +5,8 @@
 
 #include <stdint.h>
 
-#include "../include/omega/details/common.h"
+// Project common definitions
+#include "omega/details/common.h"
 
 void hash_table_init(hash_table_t *restrict table, uint32_t initial_size);
 void hash_table_free(const hash_table_t *restrict table);

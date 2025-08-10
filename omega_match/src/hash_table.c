@@ -353,10 +353,8 @@ int probe_bucket(const uint8_t *restrict control_bytes,
 #else
     // Scalar 16-byte blocks using bit tricks
   const uint8_t cand_fp = (uint8_t)((hash_uint32(cand) >> 24) | 1u);
-  // Byte trick constants: BYTE_ONE for subtraction test, HIGH_BIT for 0x80 per byte
-  const uint64_t BYTE_ONE = 0x0101010101010101ULL;
-  const uint64_t HIGH_BIT = 0x8080808080808080ULL;
-  const uint64_t rep = BYTE_ONE * cand_fp;
+  // Use named constants for scalar byte tricks
+  const uint64_t rep = BYTE_REPLICATE_64 * cand_fp;
     uint32_t probed = 0;
     while (probed < size) {
       const uint32_t contiguous = (idx + 16 <= size) ? 16u : (size - idx);
@@ -377,12 +375,12 @@ int probe_bucket(const uint8_t *restrict control_bytes,
   uint64_t block1, block2;
       memcpy(&block1, control_bytes + idx, sizeof(block1));
       memcpy(&block2, control_bytes + idx + 8, sizeof(block2));
-  const uint64_t z1 = (block1 - BYTE_ONE) & (~block1) & HIGH_BIT;
-  const uint64_t z2 = (block2 - BYTE_ONE) & (~block2) & HIGH_BIT;
+  const uint64_t z1 = (block1 - BYTE_REPLICATE_64) & (~block1) & HIGH_BIT_MASK_64;
+  const uint64_t z2 = (block2 - BYTE_REPLICATE_64) & (~block2) & HIGH_BIT_MASK_64;
       const uint64_t x1 = block1 ^ rep;
       const uint64_t x2 = block2 ^ rep;
-  const uint64_t m1 = (x1 - BYTE_ONE) & (~x1) & HIGH_BIT;
-  const uint64_t m2 = (x2 - BYTE_ONE) & (~x2) & HIGH_BIT;
+  const uint64_t m1 = (x1 - BYTE_REPLICATE_64) & (~x1) & HIGH_BIT_MASK_64;
+  const uint64_t m2 = (x2 - BYTE_REPLICATE_64) & (~x2) & HIGH_BIT_MASK_64;
       if ((z1 | m1 | z2 | m2) == 0) { idx = (idx + 16) & table_mask; probed += 16; continue; }
       for (uint32_t b = 0; b < 16; ++b) {
         const uint64_t bit = 0x80ULL << ((b & 7) * 8);

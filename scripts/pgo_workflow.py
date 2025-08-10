@@ -30,7 +30,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple, TypedDict
 
 
 def detect_platform():
@@ -60,7 +60,7 @@ def run_command(
     env: Optional[Dict[str, str]] = None,
     check: bool = True,
     timeout: Optional[int] = None,
-) -> subprocess.CompletedProcess:
+) -> subprocess.CompletedProcess[str]:
     """Run a command and return the result."""
     print(f"Running: {' '.join(cmd)}")
     if cwd:
@@ -270,7 +270,11 @@ def run_comprehensive_pgo_training(
 
     # Comprehensive training workloads
     match_output_file = str(temp_dir / "pgo_match_output.txt")
-    training_workloads = [
+    class Workload(TypedDict):
+        category: str
+        commands: List[Tuple[List[str], str]]
+
+    training_workloads: List[Workload] = [
         # === BASIC OPERATIONS ===
         {
             "category": "Basic Operations",
@@ -895,6 +899,9 @@ def process_clang_profiles(project_root: Path) -> bool:
     # Try different llvm-profdata executables
     profdata_tools = [
         "llvm-profdata",
+        "llvm-profdata-18",
+        "llvm-profdata-17",
+        "llvm-profdata-16",
         "llvm-profdata-15",
         "llvm-profdata-14",
         "llvm-profdata-13",
@@ -910,6 +917,18 @@ def process_clang_profiles(project_root: Path) -> bool:
         except:
             continue
 
+    if not profdata_cmd:
+        # Try common absolute paths
+        for p in [
+            "/usr/bin/llvm-profdata",
+            "/usr/lib/llvm-18/bin/llvm-profdata",
+            "/usr/lib/llvm-17/bin/llvm-profdata",
+            "/usr/lib/llvm-16/bin/llvm-profdata",
+        ]:
+            if Path(p).exists():
+                profdata_cmd = p
+                print(f"Using {p} for profile merging")
+                break
     if not profdata_cmd:
         print("Error: llvm-profdata not found. Please install LLVM tools.")
         return False
