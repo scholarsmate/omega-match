@@ -26,6 +26,9 @@ PATTERNS = "./data/names.txt"
 HAYSTACK = "./data/kjv.txt"
 HAYSTACK_SIZE_MB = 1024
 
+# When True, append --quiet to matcher invocations to suppress result output
+add_quiet: bool = False
+
 
 def get_binary_paths():
     """Detect the correct binary paths for different build systems."""
@@ -59,6 +62,23 @@ def get_binary_paths():
             break
 
     return debug_build, release_build
+# Cache for binary capability checks
+_quiet_support_cache: dict[str, bool] = {}
+
+def binary_supports_quiet(binary: str) -> bool:
+    """Return True if the provided olm binary supports --quiet in match mode."""
+    if not binary:
+        return False
+    if binary in _quiet_support_cache:
+        return _quiet_support_cache[binary]
+    try:
+        result = subprocess.run([binary, "match", "--help"], capture_output=True, text=True, timeout=5)
+        ok = (result.returncode == 0) and ("--quiet" in result.stdout or "--quiet" in result.stderr)
+        _quiet_support_cache[binary] = ok
+        return ok
+    except Exception:
+        _quiet_support_cache[binary] = False
+        return False
 
 
 DEBUG_BUILD, RELEASE_BUILD = get_binary_paths()
@@ -132,7 +152,11 @@ def run_perf_test(binary: Optional[str], flags: str, show_status: bool = False, 
             flush=True,
         )
 
-    cmd: List[str] = [binary, "match"] + flags.split() + [PATTERNS, HAYSTACK]  # type: ignore[list-item]
+    # Automatically add --quiet when grep is disabled and the binary supports it
+    extra: List[str] = []
+    if add_quiet and "--quiet" not in flags and binary_supports_quiet(binary):
+        extra = ["--quiet"]
+    cmd: List[str] = [binary, "match"] + extra + flags.split() + [PATTERNS, HAYSTACK]  # type: ignore[list-item]
     start = time.perf_counter()
     try:
         subprocess.run(
@@ -449,6 +473,10 @@ def main():
     else:
         tests_to_run = MATCH_VARIANTS
         print(f"[INFO] Running all {len(tests_to_run)} tests")
+
+    # Enable --quiet when grep is disabled to minimize work in child process
+    global add_quiet
+    add_quiet = bool(args.no_grep)
 
     generate_haystack()
 

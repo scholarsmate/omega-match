@@ -39,10 +39,17 @@ struct omega_list_matcher_compiler_struct {
 
 OLM_ALWAYS_INLINE static int compare_patterns(const void *restrict a,
                                               const void *restrict b) {
-  const pattern_t *p1 = a;
-  const pattern_t *p2 = b;
-  return (p2->len > p1->len) -
-         (p2->len < p1->len); // Descending order by length
+  const pattern_t *p1 = (const pattern_t *)a;
+  const pattern_t *p2 = (const pattern_t *)b;
+  // Primary: length descending
+  if (p1->len != p2->len) {
+    return (p2->len > p1->len) - (p2->len < p1->len);
+  }
+  // Tie-breaker: offset ascending (deterministic ordering)
+  if (p1->offset != p2->offset) {
+    return (p1->offset > p2->offset) - (p1->offset < p2->offset);
+  }
+  return 0;
 }
 
 OLM_ALWAYS_INLINE static int compare_uint32(const void *restrict a,

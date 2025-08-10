@@ -14,6 +14,7 @@
 #include <immintrin.h>
 #if defined(_MSC_VER)
 #include <intrin.h>
+// MSVC: use __cpuid/_xgetbv; intrinsics are always available when including <immintrin.h>
 static inline int olm_cpu_supports_avx2(void) {
   static int cached = -1;
   if (cached != -1) return cached;
@@ -25,10 +26,8 @@ static inline int olm_cpu_supports_avx2(void) {
   const int osxsave = (cpuInfo[2] & (1 << 27)) != 0;
   const int avx = (cpuInfo[2] & (1 << 28)) != 0;
   if (!(osxsave && avx)) { cached = 0; return cached; }
-  // Check XCR0 for XMM (bit 1) and YMM (bit 2)
   unsigned long long xcr0 = _xgetbv(0);
   if ((xcr0 & 0x6) != 0x6) { cached = 0; return cached; }
-  // AVX2 is leaf 7 EBX bit 5
   if (maxId >= 7) {
     __cpuidex(cpuInfo, 7, 0);
     cached = ((cpuInfo[1] & (1 << 5)) != 0);
@@ -38,10 +37,22 @@ static inline int olm_cpu_supports_avx2(void) {
   return cached;
 }
 #else
+// GCC/Clang: Prefer portable builtins when available (works on Apple Clang as well)
+#if defined(__has_builtin)
+#if __has_builtin(__builtin_cpu_supports)
+static inline int olm_cpu_supports_avx2(void) {
+  static int cached = -1;
+  if (cached != -1) return cached;
+#if __has_builtin(__builtin_cpu_init)
+  __builtin_cpu_init();
+#endif
+  cached = __builtin_cpu_supports("avx2");
+  return cached;
+}
+#else
 #include <cpuid.h>
 static inline unsigned long long olm_read_xcr0(void) {
   unsigned int eax, edx;
-  // xgetbv
   __asm__ volatile ("xgetbv" : "=a"(eax), "=d"(edx) : "c"(0));
   return ((unsigned long long)edx << 32) | eax;
 }
@@ -49,18 +60,14 @@ static inline int olm_cpu_supports_avx2(void) {
   static int cached = -1;
   if (cached != -1) return cached;
   unsigned int eax, ebx, ecx, edx;
-  // Get max basic CPUID leaf
   if (!__get_cpuid(0, &eax, &ebx, &ecx, &edx)) { cached = 0; return cached; }
   unsigned int maxId = eax;
-  // Feature flags in leaf 1
   if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) { cached = 0; return cached; }
   const int osxsave = (ecx & (1u << 27)) != 0;
   const int avx = (ecx & (1u << 28)) != 0;
   if (!(osxsave && avx)) { cached = 0; return cached; }
-  // Verify XCR0 enables XMM (bit 1) and YMM (bit 2)
   unsigned long long xcr0 = olm_read_xcr0();
   if ((xcr0 & 0x6ULL) != 0x6ULL) { cached = 0; return cached; }
-  // AVX2 is leaf 7 EBX bit 5
   if (maxId >= 7) {
     unsigned int eax7, ebx7, ecx7, edx7;
     __get_cpuid_count(7, 0, &eax7, &ebx7, &ecx7, &edx7);
@@ -70,6 +77,36 @@ static inline int olm_cpu_supports_avx2(void) {
   cached = 0;
   return cached;
 }
+#endif
+#else
+#include <cpuid.h>
+static inline unsigned long long olm_read_xcr0(void) {
+  unsigned int eax, edx;
+  __asm__ volatile ("xgetbv" : "=a"(eax), "=d"(edx) : "c"(0));
+  return ((unsigned long long)edx << 32) | eax;
+}
+static inline int olm_cpu_supports_avx2(void) {
+  static int cached = -1;
+  if (cached != -1) return cached;
+  unsigned int eax, ebx, ecx, edx;
+  if (!__get_cpuid(0, &eax, &ebx, &ecx, &edx)) { cached = 0; return cached; }
+  unsigned int maxId = eax;
+  if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) { cached = 0; return cached; }
+  const int osxsave = (ecx & (1u << 27)) != 0;
+  const int avx = (ecx & (1u << 28)) != 0;
+  if (!(osxsave && avx)) { cached = 0; return cached; }
+  unsigned long long xcr0 = olm_read_xcr0();
+  if ((xcr0 & 0x6ULL) != 0x6ULL) { cached = 0; return cached; }
+  if (maxId >= 7) {
+    unsigned int eax7, ebx7, ecx7, edx7;
+    __get_cpuid_count(7, 0, &eax7, &ebx7, &ecx7, &edx7);
+    cached = ((ebx7 & (1u << 5)) != 0);
+    return cached;
+  }
+  cached = 0;
+  return cached;
+}
+#endif
 #endif
 #else
 static inline int olm_cpu_supports_avx2(void) { return 0; }
@@ -315,8 +352,11 @@ int probe_bucket(const uint8_t *restrict control_bytes,
     return 0;
 #else
     // Scalar 16-byte blocks using bit tricks
-    const uint8_t cand_fp = (uint8_t)((hash_uint32(cand) >> 24) | 1u);
-    const uint64_t rep = 0x0101010101010101ULL * cand_fp;
+  const uint8_t cand_fp = (uint8_t)((hash_uint32(cand) >> 24) | 1u);
+  // Byte trick constants: BYTE_ONE for subtraction test, HIGH_BIT for 0x80 per byte
+  const uint64_t BYTE_ONE = 0x0101010101010101ULL;
+  const uint64_t HIGH_BIT = 0x8080808080808080ULL;
+  const uint64_t rep = BYTE_ONE * cand_fp;
     uint32_t probed = 0;
     while (probed < size) {
       const uint32_t contiguous = (idx + 16 <= size) ? 16u : (size - idx);
@@ -334,15 +374,15 @@ int probe_bucket(const uint8_t *restrict control_bytes,
         }
         continue;
       }
-      uint64_t block1, block2;
+  uint64_t block1, block2;
       memcpy(&block1, control_bytes + idx, sizeof(block1));
       memcpy(&block2, control_bytes + idx + 8, sizeof(block2));
-      const uint64_t z1 = (block1 - 0x0101010101010101ULL) & (~block1) & 0x8080808080808080ULL;
-      const uint64_t z2 = (block2 - 0x0101010101010101ULL) & (~block2) & 0x8080808080808080ULL;
+  const uint64_t z1 = (block1 - BYTE_ONE) & (~block1) & HIGH_BIT;
+  const uint64_t z2 = (block2 - BYTE_ONE) & (~block2) & HIGH_BIT;
       const uint64_t x1 = block1 ^ rep;
       const uint64_t x2 = block2 ^ rep;
-      const uint64_t m1 = (x1 - 0x0101010101010101ULL) & (~x1) & 0x8080808080808080ULL;
-      const uint64_t m2 = (x2 - 0x0101010101010101ULL) & (~x2) & 0x8080808080808080ULL;
+  const uint64_t m1 = (x1 - BYTE_ONE) & (~x1) & HIGH_BIT;
+  const uint64_t m2 = (x2 - BYTE_ONE) & (~x2) & HIGH_BIT;
       if ((z1 | m1 | z2 | m2) == 0) { idx = (idx + 16) & table_mask; probed += 16; continue; }
       for (uint32_t b = 0; b < 16; ++b) {
         const uint64_t bit = 0x80ULL << ((b & 7) * 8);

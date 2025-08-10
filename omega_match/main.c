@@ -168,6 +168,7 @@ static void match_usage(const char *prog) {
   fprintf(stderr,
     "  -o, --output FILE     Write results to FILE instead of stdout "
     "(UTF-8 and LF EOL)\n");
+  fprintf(stderr, "  -q, --quiet           Suppress match output (no results printed)\n");
   fprintf(stderr, "  --ignore-case         Ignore case during matching\n");
   fprintf(stderr,
           "  --ignore-punctuation  Ignore punctuation during matching\n");
@@ -280,12 +281,13 @@ int main(const int argc, char *argv[]) {
   // Subcommand-specific flags
   int ignore_case = 0, ignore_punctuation = 0, elide_whitespace = 0,
       longest_only = 0, no_overlap = 0, word_boundary = 0, word_prefix = 0,
-      word_suffix = 0, line_start = 0, line_end = 0, threads = 0,
-      chunk_size = 0, output_to_file = 0;
+  word_suffix = 0, line_start = 0, line_end = 0, threads = 0,
+  chunk_size = 0, output_to_file = 0, quiet = 0;
   const char *output_path = NULL;
 
   const struct option long_opts[] = {
       {"help", no_argument, NULL, 'h'},
+  {"quiet", no_argument, &quiet, 1},
       {"ignore-case", no_argument, &ignore_case, 1},
       {"ignore-punctuation", no_argument, &ignore_punctuation, 1},
       {"elide-whitespace", no_argument, &elide_whitespace, 1},
@@ -305,7 +307,7 @@ int main(const int argc, char *argv[]) {
   // Parse the subcommand options
   optind = 1;
   int opt;
-  while ((opt = getopt_long(new_argc, new_argv, "vo:t:C:", long_opts, NULL)) !=
+  while ((opt = getopt_long(new_argc, new_argv, "qvo:t:C:", long_opts, NULL)) !=
          -1) {
     switch (opt) {
     case 'h':
@@ -319,6 +321,9 @@ int main(const int argc, char *argv[]) {
       return EXIT_SUCCESS;
     case 0:
       // flag was set by long_opts
+      break;
+    case 'q':
+      quiet = 1;
       break;
     case 'v':
       verbose = 1;
@@ -455,7 +460,9 @@ int main(const int argc, char *argv[]) {
       print_match_stats(&stats, results, stderr);
     }
     // Print the results
-    print_results_buffered_fd(results, out_fd, use_console_api);
+    if (!quiet) {
+      print_results_buffered_fd(results, out_fd, use_console_api);
+    }
     // Free the results
     omega_match_results_destroy(results);
     // Destroy the matcher
