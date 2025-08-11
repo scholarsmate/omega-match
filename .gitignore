@@ -13,4 +13,7 @@ build*/
 dist/
 perf_results.csv
 perf_results.png
+perf_main.csv
+perf_perf.csv
+callgrind.*
 __pycache__/

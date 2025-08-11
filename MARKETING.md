@@ -31,7 +31,7 @@ OmegaMatch is a fast, embeddable, multi‑pattern exact matcher for products and
 ---
 ## Core Differentiators
 - **Compile → Map → Match** workflow decouples pattern management from runtime workloads.
-- **Cache-conscious layout** — Patterns clustered; short patterns fast‑pathed; radix‑sorted results enable linear post‑filter passes.
+- **Cache-conscious layout** — Patterns clustered; short patterns fast‑pathed; streaming k‑way merge enables linear post‑filter passes.
 - **Selective transforms** — Applied only when requested; no permanent preprocessing cost.
 - **Pluggable concurrency** — Tune thread count and chunk size to balance throughput vs. tail latency.
 
@@ -117,7 +117,7 @@ Hash Probe → Bucket Scan (exact compare, append matches)
   ▼
 Per‑thread Match Vectors
   ▼ (merge)
-Radix Sort (offset asc, length desc)
+K‑way Merge (offset asc, length desc)
   ▼
 Post Filters (longest-only → no-overlap; residual boundary / prefix / suffix checks)
   ▼
@@ -138,7 +138,7 @@ Position Scan
       (each successful probe emits candidate; boundary / line / prefix / suffix validated)
   ▼
 Short Matches Appended
-  (coalesced with long pattern matches before radix sort)
+  (coalesced with long pattern matches before k‑way merge)
 ```
 
 ### 4. Optional Transform Path

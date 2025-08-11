@@ -16,7 +16,7 @@ OmegaMatch is a high-performance, multi-threaded, multi-pattern matching library
 - Exact match via highly optimized hash table scans and comparisons
 - Specialized short matcher for patterns of length 1–4
 - Post-processing filters: no-overlap, longest-only, word-boundary, and line anchors
-- Optimized radix sort for results: length descending, offset ascending
+- Streaming k-way merge of per-thread results (offset asc, length desc), enabling linear-time longest-only and no-overlap filters
 - Optional case-insensitive, punctuation-ignoring, and whitespace-eliding transformations
 - Configurable memory sanitizers and thread/chunk sizes
 - **Persistable compiled pattern store:** compile patterns once to disk and memory-map for fast, concurrent reuse by multiple matcher instances with very low memory overhead.
@@ -30,6 +30,12 @@ This project uses CMake with flexible build presets:
 cmake --preset release
 cmake --build --preset release
 ctest --preset release --output-on-failure
+```
+
+If you need the build to fail when OpenMP isn't available (e.g., packaging jobs), enable the hard requirement:
+
+```sh
+cmake --preset release -DOMEGA_MATCH_REQUIRE_OPENMP=ON
 ```
 
 ### Language Bindings Build (libraries only)
@@ -105,6 +111,8 @@ cpack -G WIX --config build-msvc-release/CPackConfig.cmake
 ## Performance Testing
 
 OmegaMatch includes a comprehensive performance testing suite (`perf_test.py`) that benchmarks the library against grep-like tools when available. The test suite provides detailed performance metrics and correctness validation across multiple matching scenarios.
+
+Note: When running with `--no-grep`, the harness adds `--quiet` to matcher runs to suppress result printing and avoid IO/formatting overhead. This does not change the work performed by the matcher and only affects console output, yielding more stable measurements.
 
 ### Running Performance Tests
 
@@ -211,6 +219,70 @@ The test suite works across platforms:
 - **No grep**: Gracefully falls back to OmegaMatch-only benchmarking
 
 Results are saved to `perf_results.csv` for further analysis and plotting.
+
+## A/B performance testing (branches or binaries)
+
+Use this repeatable workflow to compare performance between two builds (e.g., main vs a perf branch) on the same machine. It generates CSVs for each build and prints a side-by-side summary with ratios.
+
+### Windows (PowerShell)
+
+Assumptions:
+- Build 1 (PERF branch): `build-msvc-release\\Release\\olm.exe`
+- Build 2 (MAIN branch): `build-msvc-release-2\\Release\\olm.exe`
+
+Run a consistent subset of tests without grep for low noise, and let the harness auto-gate `--quiet` if supported:
+
+```powershell
+# From repo root
+$perf = "$(Get-Location)\build-msvc-release\Release\olm.exe"
+$main = "$(Get-Location)\build-msvc-release-2\Release\olm.exe"
+$tests = "baseline,ignore-case,ignore-case+word-boundary,longest+no-overlap,line-start+line-end,line-start+line-end+word-boundary"
+
+Write-Host "Benchmarking PERF..."
+python perf_test.py --no-grep --no-debug --release-binary $perf --tests $tests --show-status
+Copy-Item perf_results.csv perf_perf.csv -Force
+
+Write-Host "Benchmarking MAIN..."
+python perf_test.py --no-grep --no-debug --release-binary $main --tests $tests --show-status
+Copy-Item perf_results.csv perf_main.csv -Force
+
+# Compare CSVs (prints MAIN vs PERF with ratios)
+python .\scripts\compare_branches.py perf_main.csv perf_perf.csv
+```
+
+Tips:
+- Rerun specific variants a few times if you see outliers to check variance:
+
+```powershell
+1..3 | ForEach-Object {
+    python perf_test.py --no-grep --no-debug --release-binary $perf --tests line-start+line-end+word-boundary
+    python perf_test.py --no-grep --no-debug --release-binary $main --tests line-start+line-end+word-boundary
+}
+```
+
+### Linux / WSL (bash)
+
+```bash
+# From repo root (adjust binary paths as needed)
+perf=./build-gcc-release/olm
+main=../omega-match-main/build-gcc-release/olm
+
+python3 perf_test.py --no-grep --no-debug --release-binary "$perf" \
+    --tests baseline,ignore-case,ignore-case+word-boundary,longest+no-overlap,line-start+line-end,line-start+line-end+word-boundary
+cp perf_results.csv perf_perf.csv
+
+python3 perf_test.py --no-grep --no-debug --release-binary "$main" \
+    --tests baseline,ignore-case,ignore-case+word-boundary,longest+no-overlap,line-start+line-end,line-start+line-end+word-boundary
+cp perf_results.csv perf_main.csv
+
+python3 scripts/compare_branches.py perf_main.csv perf_perf.csv
+```
+
+Notes:
+- The harness saves the latest run to `perf_results.csv`. Copy/rename to keep per-build CSVs.
+- When `--no-grep` is used, the harness will add `--quiet` automatically if the binary supports it (capability-probed via `match --help`).
+- Keep test lists identical across builds and run on an otherwise idle system for best signal.
+- `scripts/compare_branches.py` accepts two CSVs, prints MB/s for each case and the PERF/MAIN ratio.
 
 ### Performance Visualization
 
@@ -440,6 +512,7 @@ For more details, see [PGO CI/CD Integration Guide](PGO_CI_CD_GUIDE.md).
 **Match Command Options:**
 
 - `-o, --output FILE`     Write results to FILE instead of stdout (UTF-8 and LF EOL)
+- `-q, --quiet`           Suppress match output (no results printed)
 - `--ignore-case`         Ignore case during matching
 - `--ignore-punctuation`  Ignore punctuation during matching
 - `--elide-whitespace`    Remove whitespace during matching
@@ -770,8 +843,9 @@ OmegaMatch uses a two-tier matching pipeline:
 
 - **Bloom filter** for fast pre-filtering of candidate positions.
 - **Hash table scan** for exact matches of patterns of length ≥ 5.
+    - Buckets are pre-sorted by length descending (longest-first within a bucket).
 - **Short matcher** optimized for patterns of length 1–4 (bitmap lookup and binary search).
-- **Radix sort** (length desc, offset asc) followed by optional post-filters:
+- **Streaming k-way merge** of per-thread results (offset asc, length desc) with linear post-filters:
   - No-overlap
   - Longest-only
   - Word-boundary, prefix, and suffix checks

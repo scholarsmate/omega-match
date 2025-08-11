@@ -50,6 +50,9 @@ message(STATUS "Project version: ${PROJECT_VERSION}")
 # ---------------------------------------------------------------------------
 option(OMEGA_MATCH_BUILD_CLI "Build the olm CLI tool" ON)
 option(OMEGA_MATCH_WARNINGS_AS_ERRORS "Treat warnings as errors" ON)
+option(OMEGA_MATCH_ENABLE_LTO "Enable link-time optimization (IPO/LTO) for Release builds" OFF)
+option(OMEGA_MATCH_MARCH_NATIVE "Compile with -march=native for Release builds (GCC/Clang only)" OFF)
+option(OMEGA_MATCH_MTUNE_NATIVE "Compile with -mtune=native for Release builds (GCC/Clang only)" OFF)
 
 # Enable sanitizers for memory and undefined behavior
 option(ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
@@ -107,12 +110,13 @@ if(ENABLE_PGO_USE)
     elseif(CMAKE_C_COMPILER_ID STREQUAL "Clang")
         set(PGO_PROFILE_DIR "${CMAKE_BINARY_DIR}/pgo-profiles")
         set(PGO_MERGED_PROFILE "${PGO_PROFILE_DIR}/merged.profdata")
-        if(NOT EXISTS ${PGO_MERGED_PROFILE})
-            message(FATAL_ERROR "Merged PGO profile not found: ${PGO_MERGED_PROFILE}. Run merge step first.")
+        if(EXISTS ${PGO_MERGED_PROFILE})
+            add_compile_options(-fprofile-instr-use=${PGO_MERGED_PROFILE})
+            add_link_options(-fprofile-instr-use=${PGO_MERGED_PROFILE})
+            message(STATUS "Using Clang PGO profile: ${PGO_MERGED_PROFILE}")
+        else()
+            message(WARNING "Merged PGO profile not found: ${PGO_MERGED_PROFILE}. Proceeding without profile-instr-use.")
         endif()
-        add_compile_options(-fprofile-instr-use=${PGO_MERGED_PROFILE})
-        add_link_options(-fprofile-instr-use=${PGO_MERGED_PROFILE})
-        message(STATUS "Using Clang PGO profile: ${PGO_MERGED_PROFILE}")
     elseif(CMAKE_C_COMPILER_ID STREQUAL "MSVC")
         # MSVC PGO - Use phase
         # Profile data should be available from the generate phase
@@ -121,6 +125,21 @@ if(ENABLE_PGO_USE)
         message(STATUS "Using MSVC PGO profiles from previous training run")
     else()
         message(WARNING "PGO optimization not supported for compiler: ${CMAKE_C_COMPILER_ID}")
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# Check IPO/LTO support (optional)
+# ---------------------------------------------------------------------------
+include(CheckIPOSupported)
+set(HAVE_IPO FALSE)
+if(OMEGA_MATCH_ENABLE_LTO)
+    check_ipo_supported(RESULT ipo_supported OUTPUT ipo_output)
+    if(ipo_supported)
+        set(HAVE_IPO TRUE)
+        message(STATUS "IPO/LTO supported: will enable for Release/RelWithDebInfo")
+    else()
+        message(WARNING "IPO/LTO not supported by this toolchain/generator: ${ipo_output}")
     endif()
 endif()
 
@@ -199,7 +218,7 @@ endif()
 # Common library configuration (OpenMP, warnings, etc.)
 # ---------------------------------------------------------------------------
 
-# Find OpenMP (always required)
+# Find OpenMP (prefer, but allow building without it)
 # On macOS, help CMake find libomp (which is keg-only in Homebrew)
 if (APPLE)
     # Set explicit paths for macOS Homebrew libomp (keg-only package)
@@ -232,13 +251,29 @@ if (APPLE)
     endif()
 endif()
 
-find_package(OpenMP REQUIRED)
+# Optionally require OpenMP (used by packaging/CI to ensure parallel support gets built)
+option(OMEGA_MATCH_REQUIRE_OPENMP "Fail configure if OpenMP is not found" OFF)
+
+# Try to find OpenMP; allow building without it (single-threaded) unless explicitly required
+find_package(OpenMP)
+if (OpenMP_C_FOUND)
+    message(STATUS "OpenMP found: enabling parallel matching")
+    set(HAVE_OPENMP TRUE)
+else()
+    if (OMEGA_MATCH_REQUIRE_OPENMP)
+        message(FATAL_ERROR "OpenMP was required (OMEGA_MATCH_REQUIRE_OPENMP=ON) but not found. Install OpenMP and retry.")
+    endif()
+    message(WARNING "OpenMP not found; building without OpenMP (single-threaded mode)")
+    set(HAVE_OPENMP FALSE)
+endif()
 
 # Helper macro to avoid code duplication
 macro(configure_omega_match_target target_name)
-    # Always link OpenMP (required dependency)
-    target_link_libraries(${target_name} PUBLIC OpenMP::OpenMP_C)
-    target_compile_definitions(${target_name} PUBLIC OMEGA_MATCH_USE_OPENMP=1)
+    # Link OpenMP when available; otherwise compile without it
+    if (HAVE_OPENMP)
+        target_link_libraries(${target_name} PUBLIC OpenMP::OpenMP_C)
+        target_compile_definitions(${target_name} PUBLIC OMEGA_MATCH_USE_OPENMP=1)
+    endif()
 
     # Compiler-specific warnings
     if (MSVC)
@@ -253,6 +288,27 @@ macro(configure_omega_match_target target_name)
                     $<$<BOOL:${OMEGA_MATCH_WARNINGS_AS_ERRORS}>:-Werror>)
         endif ()
     endif ()
+
+    # Optional tuning flags for Release-like builds (GCC/Clang)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        if(OMEGA_MATCH_MARCH_NATIVE)
+            target_compile_options(${target_name} PRIVATE
+                $<$<CONFIG:Release>:-march=native>
+                $<$<CONFIG:RelWithDebInfo>:-march=native>)
+        endif()
+        if(OMEGA_MATCH_MTUNE_NATIVE)
+            target_compile_options(${target_name} PRIVATE
+                $<$<CONFIG:Release>:-mtune=native>
+                $<$<CONFIG:RelWithDebInfo>:-mtune=native>)
+        endif()
+    endif()
+
+    # Optional IPO/LTO for optimized configs
+    if(OMEGA_MATCH_ENABLE_LTO AND HAVE_IPO)
+        set_target_properties(${target_name} PROPERTIES
+            INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE
+            INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE)
+    endif()
 endmacro()
 
 # Apply configuration to libraries
@@ -281,8 +337,10 @@ if (OMEGA_MATCH_BUILD_CLI)
     target_link_libraries(olm PRIVATE omega_match_static)
     target_compile_features(olm PRIVATE c_std_17)
 
-    # Always link OpenMP for CLI tool (required dependency)
-    target_link_libraries(olm PRIVATE OpenMP::OpenMP_C)
+    # Link OpenMP for CLI tool when available
+    if (HAVE_OPENMP)
+        target_link_libraries(olm PRIVATE OpenMP::OpenMP_C)
+    endif()
 
     install(TARGETS olm RUNTIME DESTINATION bin)
 
