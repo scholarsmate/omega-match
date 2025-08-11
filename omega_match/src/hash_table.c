@@ -12,114 +12,81 @@
 
 #if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
 #include <immintrin.h>
-#if defined(_MSC_VER)
-#include <intrin.h>
-// MSVC: use __cpuid/_xgetbv; intrinsics are always available when including <immintrin.h>
-static inline int olm_cpu_supports_avx2(void) {
-  static int cached = -1;
-  if (cached != -1) return cached;
-  int cpuInfo[4] = {0};
-  __cpuid(cpuInfo, 0);
-  int maxId = cpuInfo[0];
-  if (maxId < 1) { cached = 0; return cached; }
-  __cpuid(cpuInfo, 1);
-  const int osxsave = (cpuInfo[2] & (1 << 27)) != 0;
-  const int avx = (cpuInfo[2] & (1 << 28)) != 0;
-  if (!(osxsave && avx)) { cached = 0; return cached; }
-  unsigned long long xcr0 = _xgetbv(0);
-  if ((xcr0 & 0x6) != 0x6) { cached = 0; return cached; }
-  if (maxId >= 7) {
-    __cpuidex(cpuInfo, 7, 0);
-    cached = ((cpuInfo[1] & (1 << 5)) != 0);
-    return cached;
-  }
-  cached = 0;
-  return cached;
-}
-#else
-// GCC/Clang: Prefer portable builtins when available (works on Apple Clang as well)
-#if defined(__has_builtin)
-#if __has_builtin(__builtin_cpu_supports)
-static inline int olm_cpu_supports_avx2(void) {
-  static int cached = -1;
-  if (cached != -1) return cached;
-#if __has_builtin(__builtin_cpu_init)
-  __builtin_cpu_init();
-#endif
-  cached = __builtin_cpu_supports("avx2");
-  return cached;
-}
-#else
-#include <cpuid.h>
-#if defined(__GNUC__) && !defined(__APPLE__)
-static inline unsigned long long olm_read_xcr0(void) {
-  unsigned int eax, edx;
-  __asm__ volatile ("xgetbv" : "=a"(eax), "=d"(edx) : "c"(0));
-  return ((unsigned long long)edx << 32) | eax;
-}
-#endif
-static inline int olm_cpu_supports_avx2(void) {
-  static int cached = -1;
-  if (cached != -1) return cached;
-  unsigned int eax, ebx, ecx, edx;
-  if (!__get_cpuid(0, &eax, &ebx, &ecx, &edx)) { cached = 0; return cached; }
-  unsigned int maxId = eax;
-  if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) { cached = 0; return cached; }
-  const int osxsave = (ecx & (1u << 27)) != 0;
-  const int avx = (ecx & (1u << 28)) != 0;
-  if (!(osxsave && avx)) { cached = 0; return cached; }
-  unsigned long long xcr0 = 0ULL;
-#if defined(__GNUC__) && !defined(__APPLE__)
-  xcr0 = olm_read_xcr0();
-#endif
-  if ((xcr0 & 0x6ULL) != 0x6ULL) { cached = 0; return cached; }
-  if (maxId >= 7) {
-    unsigned int eax7, ebx7, ecx7, edx7;
-    __get_cpuid_count(7, 0, &eax7, &ebx7, &ecx7, &edx7);
-    cached = ((ebx7 & (1u << 5)) != 0);
-    return cached;
-  }
-  cached = 0;
-  return cached;
-}
-#endif
-#else
-#include <cpuid.h>
-#if defined(__GNUC__) && !defined(__APPLE__)
-static inline unsigned long long olm_read_xcr0(void) {
-  unsigned int eax, edx;
-  __asm__ volatile ("xgetbv" : "=a"(eax), "=d"(edx) : "c"(0));
-  return ((unsigned long long)edx << 32) | eax;
-}
-#endif
-static inline int olm_cpu_supports_avx2(void) {
-  static int cached = -1;
-  if (cached != -1) return cached;
-  unsigned int eax, ebx, ecx, edx;
-  if (!__get_cpuid(0, &eax, &ebx, &ecx, &edx)) { cached = 0; return cached; }
-  unsigned int maxId = eax;
-  if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) { cached = 0; return cached; }
-  const int osxsave = (ecx & (1u << 27)) != 0;
-  const int avx = (ecx & (1u << 28)) != 0;
-  if (!(osxsave && avx)) { cached = 0; return cached; }
-  unsigned long long xcr0 = 0ULL;
-#if defined(__GNUC__) && !defined(__APPLE__)
-  xcr0 = olm_read_xcr0();
-#endif
-  if ((xcr0 & 0x6ULL) != 0x6ULL) { cached = 0; return cached; }
-  if (maxId >= 7) {
-    unsigned int eax7, ebx7, ecx7, edx7;
-    __get_cpuid_count(7, 0, &eax7, &ebx7, &ecx7, &edx7);
-    cached = ((ebx7 & (1u << 5)) != 0);
-    return cached;
-  }
-  cached = 0;
-  return cached;
-}
-#endif
-#endif
-#endif
-
+// Only define the AVX2 runtime check on x86 when the AVX2 codepath may be compiled
+#if defined(__AVX2__) || defined(_MSC_VER)
+  #if defined(_MSC_VER)
+    #include <intrin.h>
+    // MSVC: use __cpuid/_xgetbv; intrinsics are always available when including <immintrin.h>
+    static inline int olm_cpu_supports_avx2(void) {
+      static int cached = -1;
+      if (cached != -1) return cached;
+      int cpuInfo[4] = {0};
+      __cpuid(cpuInfo, 0);
+      int maxId = cpuInfo[0];
+      if (maxId < 1) { cached = 0; return cached; }
+      __cpuid(cpuInfo, 1);
+      const int osxsave = (cpuInfo[2] & (1 << 27)) != 0;
+      const int avx = (cpuInfo[2] & (1 << 28)) != 0;
+      if (!(osxsave && avx)) { cached = 0; return cached; }
+      unsigned long long xcr0 = _xgetbv(0);
+      if ((xcr0 & 0x6) != 0x6) { cached = 0; return cached; }
+      if (maxId >= 7) {
+        __cpuidex(cpuInfo, 7, 0);
+        cached = ((cpuInfo[1] & (1 << 5)) != 0);
+        return cached;
+      }
+      cached = 0;
+      return cached;
+    }
+  #else
+    // GCC/Clang: Prefer portable builtins when available (works on Apple Clang as well)
+    #if defined(__has_builtin) && __has_builtin(__builtin_cpu_supports)
+      static inline int olm_cpu_supports_avx2(void) {
+        static int cached = -1;
+        if (cached != -1) return cached;
+        #if defined(__has_builtin) && __has_builtin(__builtin_cpu_init)
+          __builtin_cpu_init();
+        #endif
+        cached = __builtin_cpu_supports("avx2");
+        return cached;
+      }
+    #else
+      #include <cpuid.h>
+      #if defined(__GNUC__) && !defined(__APPLE__)
+      static inline unsigned long long olm_read_xcr0(void) {
+        unsigned int eax, edx;
+        __asm__ volatile ("xgetbv" : "=a"(eax), "=d"(edx) : "c"(0));
+        return ((unsigned long long)edx << 32) | eax;
+      }
+      #endif
+      static inline int olm_cpu_supports_avx2(void) {
+        static int cached = -1;
+        if (cached != -1) return cached;
+        unsigned int eax, ebx, ecx, edx;
+        if (!__get_cpuid(0, &eax, &ebx, &ecx, &edx)) { cached = 0; return cached; }
+        unsigned int maxId = eax;
+        if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) { cached = 0; return cached; }
+        const int osxsave = (ecx & (1u << 27)) != 0;
+        const int avx = (ecx & (1u << 28)) != 0;
+        if (!(osxsave && avx)) { cached = 0; return cached; }
+        unsigned long long xcr0 = 0ULL;
+        #if defined(__GNUC__) && !defined(__APPLE__)
+          xcr0 = olm_read_xcr0();
+        #endif
+        if ((xcr0 & 0x6ULL) != 0x6ULL) { cached = 0; return cached; }
+        if (maxId >= 7) {
+          unsigned int eax7, ebx7, ecx7, edx7;
+          __get_cpuid_count(7, 0, &eax7, &ebx7, &ecx7, &edx7);
+          cached = ((ebx7 & (1u << 5)) != 0);
+          return cached;
+        }
+        cached = 0;
+        return cached;
+      }
+    #endif
+  #endif
+#endif // (__AVX2__) || _MSC_VER
+#endif // x86 arch
 // --- Hash table parameters ---
 // Hash table load factor (threshold for resizing). Lower to reduce probe chain
 // lengths and improve lookup performance.
