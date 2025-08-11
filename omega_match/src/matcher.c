@@ -553,14 +553,14 @@ finalize_match_results(match_vector_t **restrict thread_matches,
     ABORT("finalize_match_results: malloc heap");
   }
 
-  // Comparison defined at file scope: cmp_run
+  // Comparison helper defined at file scope: cmp_run
 
   // Heapify
   for (size_t i = 0; i < active; ++i) heap[i] = i;
   for (ptrdiff_t i = (ptrdiff_t)active / 2 - 1; i >= 0; --i) {
     // Sift-down from i
     size_t start = (size_t)i;
-    // Inline loop for sift-down using CMP_RUN macro
+  // Sift-down loop to maintain heap property
     size_t n = active, idx = start;
     for (;;) {
       size_t l = 2 * idx + 1, r = l + 1, smallest = idx;
@@ -609,7 +609,7 @@ finalize_match_results(match_vector_t **restrict thread_matches,
       --active;
     } else {
       // Restore heap property at root only
-      // No-op here; we'll sift-down below with current active size
+  // Advance handled; restore heap property below via sift-down
     }
     if (active > 0) {
       // Place root properly using sift-down
@@ -682,7 +682,7 @@ static OLM_ALWAYS_INLINE int binary_search_uint32_optimized(
   return 0;
 }
 
-// duplicate run_t/cmp_run removed
+// --
 
 // Optimized short matcher queries with better branch prediction
 static OLM_ALWAYS_INLINE int
