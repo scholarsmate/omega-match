@@ -118,8 +118,6 @@ static inline int olm_cpu_supports_avx2(void) {
 }
 #endif
 #endif
-#else
-static inline int olm_cpu_supports_avx2(void) { return 0; }
 #endif
 
 // --- Hash table parameters ---
