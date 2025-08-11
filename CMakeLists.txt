@@ -184,34 +184,29 @@ target_include_directories(omega_match_static
     $<INSTALL_INTERFACE:include>)
 target_compile_features(omega_match_static PUBLIC c_std_17)
 
-# Build shared library (conditionally - skip during PGO phases for MSVC compatibility)
-if(NOT (ENABLE_PGO_GENERATE OR ENABLE_PGO_USE) OR NOT MSVC)
-    add_library(omega_match_shared SHARED ${OMEGA_MATCH_SOURCES})
+# Always build shared library (DLL) for MSVC, even during PGO phases
+add_library(omega_match_shared SHARED ${OMEGA_MATCH_SOURCES})
+set_target_properties(omega_match_shared PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    OUTPUT_NAME omega_match)                   # libomega_match.(so|dylib) or omega_match.dll
+target_include_directories(omega_match_shared
+    PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/omega_match/include>
+    $<INSTALL_INTERFACE:include>)
+target_compile_features(omega_match_shared PUBLIC c_std_17)
+
+# Export all symbols for Windows DLL
+if (WIN32)
+    # Enable automatic symbol export on Windows
     set_target_properties(omega_match_shared PROPERTIES
-        POSITION_INDEPENDENT_CODE ON
-        OUTPUT_NAME omega_match)                   # libomega_match.(so|dylib) or omega_match.dll
-    target_include_directories(omega_match_shared
-        PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/omega_match/include>
-        $<INSTALL_INTERFACE:include>)
-    target_compile_features(omega_match_shared PUBLIC c_std_17)
+        WINDOWS_EXPORT_ALL_SYMBOLS TRUE
+        ARCHIVE_OUTPUT_NAME omega_match        # omega_match.lib (import library)
+        RUNTIME_OUTPUT_NAME omega_match        # omega_match.dll
+    )
+endif ()
 
-    # Export all symbols for Windows DLL
-    if (WIN32)
-        # Enable automatic symbol export on Windows
-        set_target_properties(omega_match_shared PROPERTIES
-            WINDOWS_EXPORT_ALL_SYMBOLS TRUE
-            ARCHIVE_OUTPUT_NAME omega_match        # omega_match.lib (import library)
-            RUNTIME_OUTPUT_NAME omega_match        # omega_match.dll
-        )
-    endif ()
-
-    # Create the main alias for external use (defaults to shared when available)
-    add_library(omega_match ALIAS omega_match_shared)
-else()
-    # During MSVC PGO phases, use static library as main target
-    add_library(omega_match ALIAS omega_match_static)
-endif()
+# Create the main alias for external use (defaults to shared when available)
+add_library(omega_match ALIAS omega_match_shared)
 
 
 # ---------------------------------------------------------------------------
@@ -444,13 +439,11 @@ install(TARGETS omega_match_static
         RUNTIME DESTINATION bin)
 
 # Conditionally install shared library (only when not in MSVC PGO phases)
-if(NOT (ENABLE_PGO_GENERATE OR ENABLE_PGO_USE) OR NOT MSVC)
-    install(TARGETS omega_match_shared
-            EXPORT omega_matchTargets
-            ARCHIVE DESTINATION lib
-            LIBRARY DESTINATION lib
-            RUNTIME DESTINATION bin)
-endif()
+install(TARGETS omega_match_shared
+    EXPORT omega_matchTargets
+    ARCHIVE DESTINATION lib
+    LIBRARY DESTINATION lib
+    RUNTIME DESTINATION bin)
 
 install(DIRECTORY omega_match/include/ DESTINATION omega_match/include)
 
@@ -523,9 +516,8 @@ include(CPack)
 # ---------------------------------------------------------------------------
 # Copy shared library to Python bindings with platform-specific name (skip during MSVC PGO phases)
 # ---------------------------------------------------------------------------
-if(NOT (ENABLE_PGO_GENERATE OR ENABLE_PGO_USE) OR NOT MSVC)
-    set(PYBINDINGS_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/bindings/python/omega_match/native/lib")
-    file(MAKE_DIRECTORY ${PYBINDINGS_LIB_DIR})
+set(PYBINDINGS_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/bindings/python/omega_match/native/lib")
+file(MAKE_DIRECTORY ${PYBINDINGS_LIB_DIR})
 
 if (WIN32)
     # Only x64 currently provided for Windows
@@ -594,7 +586,6 @@ add_test(NAME python_pytest
     COMMAND ${Python3_EXECUTABLE} -m pytest tests
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bindings/python
 )
-endif()
 
 if (MSVC)
     add_definitions(-D_CRT_SECURE_NO_WARNINGS)
