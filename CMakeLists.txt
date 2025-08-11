@@ -50,6 +50,9 @@ message(STATUS "Project version: ${PROJECT_VERSION}")
 # ---------------------------------------------------------------------------
 option(OMEGA_MATCH_BUILD_CLI "Build the olm CLI tool" ON)
 option(OMEGA_MATCH_WARNINGS_AS_ERRORS "Treat warnings as errors" ON)
+option(OMEGA_MATCH_ENABLE_LTO "Enable link-time optimization (IPO/LTO) for Release builds" OFF)
+option(OMEGA_MATCH_MARCH_NATIVE "Compile with -march=native for Release builds (GCC/Clang only)" OFF)
+option(OMEGA_MATCH_MTUNE_NATIVE "Compile with -mtune=native for Release builds (GCC/Clang only)" OFF)
 
 # Enable sanitizers for memory and undefined behavior
 option(ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
@@ -122,6 +125,21 @@ if(ENABLE_PGO_USE)
         message(STATUS "Using MSVC PGO profiles from previous training run")
     else()
         message(WARNING "PGO optimization not supported for compiler: ${CMAKE_C_COMPILER_ID}")
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# Check IPO/LTO support (optional)
+# ---------------------------------------------------------------------------
+include(CheckIPOSupported)
+set(HAVE_IPO FALSE)
+if(OMEGA_MATCH_ENABLE_LTO)
+    check_ipo_supported(RESULT ipo_supported OUTPUT ipo_output)
+    if(ipo_supported)
+        set(HAVE_IPO TRUE)
+        message(STATUS "IPO/LTO supported: will enable for Release/RelWithDebInfo")
+    else()
+        message(WARNING "IPO/LTO not supported by this toolchain/generator: ${ipo_output}")
     endif()
 endif()
 
@@ -270,6 +288,27 @@ macro(configure_omega_match_target target_name)
                     $<$<BOOL:${OMEGA_MATCH_WARNINGS_AS_ERRORS}>:-Werror>)
         endif ()
     endif ()
+
+    # Optional tuning flags for Release-like builds (GCC/Clang)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        if(OMEGA_MATCH_MARCH_NATIVE)
+            target_compile_options(${target_name} PRIVATE
+                $<$<CONFIG:Release>:-march=native>
+                $<$<CONFIG:RelWithDebInfo>:-march=native>)
+        endif()
+        if(OMEGA_MATCH_MTUNE_NATIVE)
+            target_compile_options(${target_name} PRIVATE
+                $<$<CONFIG:Release>:-mtune=native>
+                $<$<CONFIG:RelWithDebInfo>:-mtune=native>)
+        endif()
+    endif()
+
+    # Optional IPO/LTO for optimized configs
+    if(OMEGA_MATCH_ENABLE_LTO AND HAVE_IPO)
+        set_target_properties(${target_name} PROPERTIES
+            INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE
+            INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE)
+    endif()
 endmacro()
 
 # Apply configuration to libraries
