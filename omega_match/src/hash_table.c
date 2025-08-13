@@ -19,6 +19,12 @@
   #endif
 
   // Common AVX2 detection logic, parameterized by platform-specific queries
+  // Mark as maybe unused: some compilation paths (e.g., GCC with builtin CPU support)
+  // inline the alternative detection and never reference this helper, triggering
+  // -Werror=unused-function in Debug builds with warnings-as-errors.
+  #if defined(__GNUC__) || defined(__clang__)
+  __attribute__((unused))
+  #endif
   static int olm_avx2_supported_impl(
       void (*cpuid_func)(int[4], int),
       unsigned long long (*get_xcr0_func)(void),

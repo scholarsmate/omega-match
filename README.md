@@ -9,6 +9,8 @@
 
 OmegaMatch is a high-performance, multi-threaded, multi-pattern matching library written in C. It combines a Bloom filter, hash table, and optimized "short matcher" to scan large content for multiple patterns in parallel.
 
+> Need build, performance benchmarking, PGO, or architecture details? See the **[Development & Performance Guide](DEVELOPMENT.md)**.
+
 ## Features
 
 - Parallel matching using [OpenMP](https://www.openmp.org/)
@@ -144,7 +146,7 @@ PS D:\GitHub\omega-match> python3.exe .\perf_test.py --show-status
 [INFO] Status messages enabled
 
 Test Case                                                | Debug MB/s   | Release MB/s | Grep MB/s    | Ratio    | Compare   
-----------------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------------
 baseline                                                 | 4262.54      | 7992.79      | N/A          | N/A      | N/A       
 ignore-case                                              | 999.67       | 2360.44      | N/A          | N/A      | N/A       
 ignore-case+ignore-punct                                 | 1024.10      | 2505.49      | N/A          | N/A      | N/A       
@@ -166,9 +168,53 @@ no-overlap+word-boundary                                 | 6504.39      | 9852.6
 word-boundary                                            | 6071.29      | 9641.10      | N/A          | N/A      | N/A     
 word-prefix                                              | 3499.79      | 6377.13      | N/A          | N/A      | N/A     
 word-suffix                                              | 3906.00      | 7703.24      | N/A          | N/A      | N/A     
-----------------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------------
 [INFO] Performance test completed. Results saved to ./perf_results.csv.
 ```
+
+### Latest Linux (WSL2 AlmaLinux 10, GCC 14.2.1) Snapshot – Aug 2025
+
+Environment:
+
+| Item | Value |
+|------|-------|
+| OS | AlmaLinux 10 (WSL2) |
+| CPU | Intel Core Ultra 7 165H (22 HW threads reported) |
+| Compiler | GCC 14.2.1 |
+| OpenMP threads | 8 |
+| PGO Training | `scripts/pgo_workflow.py --compiler gcc` (all 40 workloads succeeded) |
+
+Key throughput (MB/s) for selected scenarios (higher is better):
+
+| Test Case | Debug | Release | Release+PGO | Δ PGO vs Release |
+|-----------|-------|---------|-------------|------------------|
+| baseline | 10,338 | 15,286 | 18,003 | +17.8% |
+| ignore-case+no-overlap+longest | 4,488 | 7,584 | 8,182 | +7.9% |
+| line-end | 12,228 | 23,389 | 23,411 | ~0% |
+| line-end+ignore-case | 7,870 | 14,923 | 16,546 | +10.9% |
+| line-start+line-end | 11,475 | 21,722 | 20,740 | -4.5% (minor variance) |
+| longest+no-overlap | 10,306 | 19,962 | 20,206 | +1.2% |
+| longest+no-overlap+word-boundary | 9,170 | 18,506 | 19,204 | +3.8% |
+
+Observations:
+* PGO provided consistent gains (5–18%) on many mixed-flag workloads (especially heavy transformation / filtering cases) while some anchor-heavy paths were already near peak.
+* A small regression (line-start+line-end) is within expected run-to-run variance; re-training with workload emphasis on dual-anchor cases can mitigate if persistent.f
+* Grep-comparable ratios (e.g. line-end variants 90x–235x+) exceed earlier Windows Git Bash examples due to different normalization and environment.
+
+Note: Throughput values are normalized by the harness constant (1GB logical size) for comparability across runs; actual on-disk `data/kjv.txt` size is smaller. To benchmark with a synthetic 1GB haystack, delete or rename `data/kjv.txt` so the generator path creates a large file, or adjust `HAYSTACK_SIZE_MB` in `perf_test.py` to match the real haystack size.
+
+Reproduce:
+```bash
+cmake --preset debug && cmake --build --preset debug
+cmake --preset release && cmake --build --preset release
+python3 scripts/pgo_workflow.py --compiler gcc
+python3 perf_test.py --show-status
+python3 scripts/plot_perf.py   # generates images/perf_results_log.png (fallback plotter if gnuplot unavailable)
+```
+
+These results will be updated as further optimizations land.
+
+![Current Performance Plot (Log Scale)](images/perf_results_log.png)
 
 ### Understanding the Results
 
@@ -188,7 +234,7 @@ word-suffix                                              | 3906.00      | 7703.2
 ### Test Data
 
 The performance tests use realistic datasets:
-- **Patterns**: `data/names.txt` (surnames list, ~2,000 patterns)
+- **Patterns**: `data/names.txt` (given name list, ~2,000 patterns)
 - **Haystack**: `data/kjv.txt` (King James Bible, ~4MB text)
 - **Workload**: Multi-threaded pattern matching with various options
 
@@ -733,10 +779,10 @@ with Matcher("patterns.olm") as matcher:
 ### Cross-Platform Support
 
 The Python package includes pre-built native libraries for:
-- **Linux x64**: Standard, GCC PGO (+10-15%), Clang PGO (+15-20%)
+- **Linux x64**: Standard, GCC PGO, and Clang PGO variants
 - **Linux ARM64**: Optimized for ARM64 processors
 - **macOS ARM64**: Apple Silicon optimized (M1, M2, M3, etc.)
-- **Windows x64**: Standard and MSVC PGO (+5-10%)
+- **Windows x64**: Standard and MSVC PGO variants
 
 The optimal library variant is automatically selected based on:
 1. **Platform detection** (OS and architecture)
@@ -824,6 +870,7 @@ python -m omega_match.olm match <compiled.olm> <haystack.txt> [options]
 - `--threads N`           Number of threads to use
 - `--chunk-size N`        Chunk size for parallel processing
 - `-v, --verbose`         Enable verbose output
+- `-h, --help`            Show this help message
 
 #### Example
 
@@ -874,8 +921,8 @@ Supported compilers: GCC, Clang, MSVC (via CMake).
 
 This project uses GitHub Actions for Continuous Integration and Continuous Deployment.
 
-- **CI Pipeline (`ci.yml`):** On every push and pull request to `main`, the CI pipeline builds and tests the project on Windows (MSVC), Linux (GCC), and macOS (Clang) across x64 and ARM64 architectures.
-- **Release Pipeline (`release.yml`):** When a new tag matching `v*` is pushed, the release pipeline builds, tests, and packages the project. It creates platform-specific installers (DEB, RPM, TGZ, WIX), builds a universal Python wheel, publishes it to PyPI, and creates a GitHub Release with all the generated artifacts.
+- **CI Pipeline (`ci.yml`)**: On every push and pull request to `main`, the CI pipeline builds and tests the project on Windows (MSVC), Linux (GCC), and macOS (Clang) across x64 and ARM64 architectures.
+- **Release Pipeline (`release.yml`)**: When a new tag matching `v*` is pushed, the release pipeline builds, tests, and packages the project. It creates platform-specific installers (DEB, RPM, TGZ, WIX), builds a universal Python wheel, publishes it to PyPI, and creates a GitHub Release with all the generated artifacts.
 
 ## Used By
 
@@ -885,4 +932,4 @@ This project uses GitHub Actions for Continuous Integration and Continuous Deplo
 
 The OmegaMatch project is licensed under the [Apache License 2.0](LICENSE).
 
-OmegaMatch is not an official Apache Software Foundation (ASF) project.
+OmegaMatch is *not* an official Apache Software Foundation (ASF) project.
