@@ -608,6 +608,36 @@ jobs:
         path: artifacts/
     
   # Variant artifacts now have unique names from CPack (variant suffix baked in)
+    - name: Assert unique release asset filenames
+      run: |
+        set -euo pipefail
+        echo "Collecting release candidate artifact files (.deb .rpm .tar.gz .msi .whl)"
+        mapfile -t files < <(find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' -o -name '*.msi' -o -name '*.whl' \))
+        echo "Found ${#files[@]} files"
+        if [ ${#files[@]} -eq 0 ]; then
+          echo "ERROR: No release artifacts found" >&2
+          exit 1
+        fi
+        declare -A seen
+        dup=0
+        for f in "${files[@]}"; do
+          bn=$(basename "$f")
+          if [[ -n "${seen[$bn]:-}" ]]; then
+            echo "DUPLICATE filename detected: $bn" >&2
+            echo "  Existing: ${seen[$bn]}" >&2
+            echo "  New:      $f" >&2
+            dup=1
+          else
+            seen[$bn]="$f"
+          fi
+        done
+        if [ $dup -ne 0 ]; then
+          echo "ERROR: Duplicate artifact filenames would cause GitHub Release upload conflicts." >&2
+          exit 1
+        fi
+        echo "All artifact filenames are unique. Listing:";
+        for k in "${!seen[@]}"; do echo "  $k"; done | sort
+      shell: bash
     
     - name: Create Release
       uses: softprops/action-gh-release@v1
