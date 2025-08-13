@@ -50,6 +50,7 @@ def compile_mode(
 def match_mode(
     compiled_file: str,
     haystack_file: str,
+    output_file: str,
     case_insensitive: bool,
     ignore_punctuation: bool,
     elide_whitespace: bool,
@@ -90,11 +91,26 @@ def match_mode(
             stats = matcher.get_match_stats()
             print("Match Stats:", stats, file=sys.stderr)
 
-        for r in results:
-            # Always emit Unix-style newlines
-            sys.stdout.write(
-                f"{r.offset}:{r.match.decode('utf-8', errors='replace')}\n"
-            )
+        # Handle output file
+        output_stream = sys.stdout
+        if output_file and output_file.upper() != "NUL":
+            output_stream = open(output_file, "w", encoding="utf-8", newline="\n")
+        elif output_file and output_file.upper() == "NUL":
+            # Handle NUL output (discard results)
+            if os.name == "nt":
+                output_stream = open("NUL", "w")
+            else:
+                output_stream = open("/dev/null", "w")
+
+        try:
+            for r in results:
+                # Always emit Unix-style newlines
+                output_stream.write(
+                    f"{r.offset}:{r.match.decode('utf-8', errors='replace')}\n"
+                )
+        finally:
+            if output_file and output_stream != sys.stdout:
+                output_stream.close()
 
 
 def main() -> None:
@@ -131,6 +147,9 @@ def main() -> None:
     match_parser = subparsers.add_parser("match", help="Match patterns")
     match_parser.add_argument("compiled", help="Input compiled file")
     match_parser.add_argument("haystack", help="Input haystack file")
+    match_parser.add_argument(
+        "-o", "--output", help="Write results to FILE instead of stdout"
+    )
     match_parser.add_argument(
         "--ignore-case", action="store_true", help="Ignore case during matching"
     )
@@ -208,6 +227,7 @@ def main() -> None:
         match_mode(
             compiled_file=args.compiled,
             haystack_file=args.haystack,
+            output_file=args.output,
             case_insensitive=args.ignore_case,
             ignore_punctuation=args.ignore_punctuation,
             elide_whitespace=args.elide_whitespace,

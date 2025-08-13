@@ -30,7 +30,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple, TypedDict
 
 
 def detect_platform():
@@ -60,7 +60,7 @@ def run_command(
     env: Optional[Dict[str, str]] = None,
     check: bool = True,
     timeout: Optional[int] = None,
-) -> subprocess.CompletedProcess:
+) -> subprocess.CompletedProcess[str]:
     """Run a command and return the result."""
     print(f"Running: {' '.join(cmd)}")
     if cwd:
@@ -185,11 +185,20 @@ def configure_and_build(
 
     config_cmd = ["cmake", "--preset", preset_name]
 
-    # Add Python executable for cross-platform compatibility
+    # Add Python executable for cross-platform compatibility and require OpenMP for perf builds
     python_exe = sys.executable
-    config_cmd.extend([f"-DPython3_EXECUTABLE={python_exe}"])
+    config_cmd.extend([f"-DPython3_EXECUTABLE={python_exe}", "-DOMEGA_MATCH_REQUIRE_OPENMP=ON"])
 
-    run_command(config_cmd, cwd=project_root)
+    # On macOS runners, hint libomp paths if available
+    if platform_name == "macos":
+        env = os.environ.copy()
+        env.setdefault("LDFLAGS", "-L/opt/homebrew/opt/libomp/lib -L/usr/local/opt/libomp/lib")
+        env.setdefault("CPPFLAGS", "-I/opt/homebrew/opt/libomp/include -I/usr/local/opt/libomp/include")
+        env.setdefault("OpenMP_ROOT", "/opt/homebrew/opt/libomp:/usr/local/opt/libomp")
+        run_command(config_cmd, cwd=project_root, env=env)
+    else:
+        run_command(config_cmd, cwd=project_root)
+
 
     print(f"\n=== Building {preset_name} ===")
 
@@ -270,7 +279,11 @@ def run_comprehensive_pgo_training(
 
     # Comprehensive training workloads
     match_output_file = str(temp_dir / "pgo_match_output.txt")
-    training_workloads = [
+    class Workload(TypedDict):
+        category: str
+        commands: List[Tuple[List[str], str]]
+
+    training_workloads: List[Workload] = [
         # === BASIC OPERATIONS ===
         {
             "category": "Basic Operations",
@@ -895,6 +908,9 @@ def process_clang_profiles(project_root: Path) -> bool:
     # Try different llvm-profdata executables
     profdata_tools = [
         "llvm-profdata",
+        "llvm-profdata-18",
+        "llvm-profdata-17",
+        "llvm-profdata-16",
         "llvm-profdata-15",
         "llvm-profdata-14",
         "llvm-profdata-13",
@@ -910,6 +926,18 @@ def process_clang_profiles(project_root: Path) -> bool:
         except:
             continue
 
+    if not profdata_cmd:
+        # Try common absolute paths
+        for p in [
+            "/usr/bin/llvm-profdata",
+            "/usr/lib/llvm-18/bin/llvm-profdata",
+            "/usr/lib/llvm-17/bin/llvm-profdata",
+            "/usr/lib/llvm-16/bin/llvm-profdata",
+        ]:
+            if Path(p).exists():
+                profdata_cmd = p
+                print(f"Using {p} for profile merging")
+                break
     if not profdata_cmd:
         print("Error: llvm-profdata not found. Please install LLVM tools.")
         return False

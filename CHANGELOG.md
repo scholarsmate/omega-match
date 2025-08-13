@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2025-08-10
+
+### Added
+- SIMD-accelerated control-byte probing for hash table lookups (AVX2/SSE2 on x86; NEON on arm64) with runtime CPU feature detection and safe compile-time guards.
+- Streaming k-way merge of per-thread results (offset asc, length desc) with on-merge filters (longest-only, no-overlap) in O(n).
+- Optional `--quiet` flag for CLI to suppress match output; perf harness auto-detects and enables when grep is disabled.
+- Callgrind helpers and reporting tools: `profile_callgrind`, `profile_callgrind_report`, `profile_callgrind_compare` targets and `scripts/callgrind_report.py`.
+- A/B performance comparison helper `scripts/compare_branches.py`.
+- CMake options to toggle LTO/IPO and tuning: `OMEGA_MATCH_ENABLE_LTO`, `OMEGA_MATCH_MARCH_NATIVE`, `OMEGA_MATCH_MTUNE_NATIVE`.
+- Python CLI tool (`bindings/python/olm.py`) with `--output` option for feature parity with native CLI.
+- PGO library variant naming and automatic selection in Python bindings for optimal performance.
+
+### Changed
+- Persisted compiled format bumped to v2: control-byte fingerprint array precedes index array; loader/compiler updated.
+- Hash table insertion simplified to single-pass robin-hood; lower load factor to reduce probe chains.
+- Bloom filter tuned to 20 bits/entry; improved word sharing and prefetching.
+- Portable prefetch macro refined for MSVC and GCC/Clang.
+- OpenMP handling: optional by default with `OMEGA_MATCH_REQUIRE_OPENMP` to enforce in CI/packaging.
+- Python bindings now automatically select and use PGO-optimized libraries when available.
+
+### Performance
+- Faster candidate probing and bucket scans; fewer cache misses.
+- Eliminated global radix sort in favor of streaming k-way merge with linear-time filters.
+
+### CI/Tooling
+- Hardened PGO workflow (GCC/Clang/MSVC) with broader `llvm-profdata` discovery and non-fatal missing-profile handling for Clang.
+- macOS libomp discovery hints; MSVC OpenMP loop index fix.
+- Perf harness improvements: flags cleanup, binary overrides, grep detection, and CSV outputs.
+
+### Fixed
+- MSVC PGO build failure caused by CMake WINDOWS_EXPORT_ALL_SYMBOLS crash during instrumentation phase.
+- Added explicit `.def` file for symbol export during MSVC PGO builds to avoid CMake object file analysis issues.
+- Implemented hybrid optimization strategy: PGO for executable, standard optimization for shared library to work around MSVC profile database limitations.
+
+### Notes
+- The compiled pattern store file layout changed (format v2). Recompile pattern stores before use.
+
+
 ## [0.1.0] - 2025-06-22
 
 ### Features

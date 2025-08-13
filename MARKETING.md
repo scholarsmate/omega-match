@@ -10,12 +10,13 @@ OmegaMatch is a fast, embeddable, multi‑pattern exact matcher for products and
 |------------|------------------------|
 | Memory‑mapped compiled pattern store | Compile once; deploy everywhere; near-zero warmup. |
 | Multi-threaded (OpenMP) core | Scales with cores for batch or streaming workloads. |
+| Profile-Guided Optimization (PGO) builds | Maximum performance on Windows (MSVC), Linux (GCC/Clang) with training-optimized code. |
 | Two-tier pipeline (Bloom + hash table) | Filters >90% of non-matches early; fewer cache misses; higher throughput. |
 | Specialized short‑pattern accelerator | Ultra-fast handling of 1–4 byte patterns (bitmap + binary search). |
 | Rich post-filters | Word/line anchors, longest-only, no-overlap, prefix/suffix constraints. |
 | Transform layer | Case-insensitive, ignore punctuation, elide whitespace — without per-call reallocation. |
 | Deterministic & exact | No false positives (Bloom pre-filters only; exact hash validation). |
-| Cross-platform | Windows, Linux, macOS (C library + Python bindings). |
+| Cross-platform | Windows, Linux, macOS (C library + Python bindings + CLI tools). |
 | Low operational footprint | Share the same compiled pattern file across processes; minimal per-instance memory. |
 | Apache 2.0 FOSS | Use in commercial, cloud, on-prem, embedded — no licensing friction. |
 
@@ -25,13 +26,13 @@ OmegaMatch is a fast, embeddable, multi‑pattern exact matcher for products and
 2. **Operational Simplicity** — Pattern lists become artifacts you can version, sign, ship, and hot‑reload.
 3. **Predictable Latency** — Pure CPU, no GC pauses, no dynamic regex backtracking explosions.
 4. **Feature Pragmatism** — Focused on *exact multi-pattern* matching with powerful structural filters, not an overgeneral regex VM.
-5. **Transparent Performance** — Benchmarked openly (includes its own performance harness).
-6. **Extensible Surface** — Clean C API plus Python module for rapid integration and prototyping.
+5. **Transparent Performance** — Benchmarked openly (includes its own performance harness). PGO builds available for maximum optimization.
+6. **Extensible Surface** — Clean C API plus Python module and CLI tools for rapid integration and prototyping.
 
 ---
 ## Core Differentiators
 - **Compile → Map → Match** workflow decouples pattern management from runtime workloads.
-- **Cache-conscious layout** — Patterns clustered; short patterns fast‑pathed; radix‑sorted results enable linear post‑filter passes.
+- **Cache-conscious layout** — Patterns clustered; short patterns fast‑pathed; streaming k‑way merge enables linear post‑filter passes.
 - **Selective transforms** — Applied only when requested; no permanent preprocessing cost.
 - **Pluggable concurrency** — Tune thread count and chunk size to balance throughput vs. tail latency.
 
@@ -117,7 +118,7 @@ Hash Probe → Bucket Scan (exact compare, append matches)
   ▼
 Per‑thread Match Vectors
   ▼ (merge)
-Radix Sort (offset asc, length desc)
+K‑way Merge (offset asc, length desc)
   ▼
 Post Filters (longest-only → no-overlap; residual boundary / prefix / suffix checks)
   ▼
@@ -138,7 +139,7 @@ Position Scan
       (each successful probe emits candidate; boundary / line / prefix / suffix validated)
   ▼
 Short Matches Appended
-  (coalesced with long pattern matches before radix sort)
+  (coalesced with long pattern matches before k‑way merge)
 ```
 
 ### 4. Optional Transform Path
@@ -169,6 +170,15 @@ m = OmegaMatch("patterns.txt", case_insensitive=True, ignore_punctuation=False, 
 results = m.match(open("haystack.txt","rb").read(), word_boundary=True, longest_only=True, no_overlap=True)
 for off, length in results:
     print(off, length)
+```
+
+## Quick Start (Python CLI)
+```bash
+# Compile patterns
+python bindings/python/olm.py compile patterns.olm patterns.txt --ignore-case
+
+# Match with output to file
+python bindings/python/olm.py match patterns.olm haystack.txt --output results.txt --word-boundary --longest
 ```
 
 ---

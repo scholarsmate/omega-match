@@ -10,12 +10,13 @@
 #include "omega/details/common.h"
 #include "omega/details/dedupe_set.h"
 #include "omega/details/hash_table.h"
+#include "omega/details/hash.h"
 #include "omega/details/pattern_store.h"
 #include "omega/details/transform_table.h"
 #include "omega/details/util.h"
 #include "omega/list_matcher.h"
 
-#define BLOOM_NUM_BITS_PER_ENTRY (16) // bits per entry
+#define BLOOM_NUM_BITS_PER_ENTRY (20) // bits per entry (higher -> fewer FPs)
 #define INITIAL_SHORT_CAPACITY (64)
 
 typedef struct {
@@ -38,10 +39,17 @@ struct omega_list_matcher_compiler_struct {
 
 OLM_ALWAYS_INLINE static int compare_patterns(const void *restrict a,
                                               const void *restrict b) {
-  const pattern_t *p1 = a;
-  const pattern_t *p2 = b;
-  return (p2->len > p1->len) -
-         (p2->len < p1->len); // Descending order by length
+  const pattern_t *p1 = (const pattern_t *)a;
+  const pattern_t *p2 = (const pattern_t *)b;
+  // Primary: length descending
+  if (p1->len != p2->len) {
+    return (p2->len > p1->len) - (p2->len < p1->len);
+  }
+  // Tie-breaker: offset ascending (deterministic ordering)
+  if (p1->offset != p2->offset) {
+    return (p1->offset > p2->offset) - (p1->offset < p2->offset);
+  }
+  return 0;
 }
 
 OLM_ALWAYS_INLINE static int compare_uint32(const void *restrict a,
@@ -296,11 +304,26 @@ int omega_list_matcher_compiler_destroy(
   fwrite(compiler->table.header, sizeof(compiler->table.header), 1,
          compiler->compiled_fp);
 
+  // Reserve and write control-byte fingerprint array (version >=2 layout)
+  //   0x00 => empty slot; non-zero => 8-bit fingerprint of key's hash
+  const long control_array_start = ftell(compiler->compiled_fp);
+  uint8_t *control_array = calloc(compiler->table.size, sizeof(uint8_t));
+  if (unlikely(!control_array)) {
+    ABORT("calloc control_array");
+  }
+  fwrite(control_array, sizeof(uint8_t), compiler->table.size,
+         compiler->compiled_fp);
+
   // Reserve space for the index array
   const long index_array_start = ftell(compiler->compiled_fp);
-  uint32_t *index_array = calloc(compiler->table.size, sizeof(uint32_t));
+  // Initialize all entries to 0xFFFFFFFF (EMPTY_SLOT sentinel)
+  uint32_t *index_array = malloc(compiler->table.size * sizeof(uint32_t));
+  if (unlikely(!index_array)) {
+    ABORT("malloc index_array");
+  }
+  memset(index_array, 0xFF, compiler->table.size * sizeof(uint32_t));
 
-  // Reserve space for the hash table index array
+  // Reserve space for the hash table index array with the current sentinel values
   fwrite(index_array, sizeof(uint32_t), compiler->table.size,
          compiler->compiled_fp);
 
@@ -312,6 +335,9 @@ int omega_list_matcher_compiler_destroy(
     }
     const long offset = ftell(compiler->compiled_fp);
     index_array[i] = (uint32_t)(offset - bucket_data_start);
+    // Compute an 8-bit fingerprint from the key's hash. Ensure non-zero.
+    const uint8_t fp = (uint8_t)((hash_uint32(compiler->table.entries[i].key) >> 24) | 1u);
+    control_array[i] = fp;
     fwrite(&compiler->table.entries[i].key, sizeof(uint32_t), 1,
            compiler->compiled_fp);
     fwrite(&compiler->table.entries[i].count, sizeof(uint32_t), 1,
@@ -329,6 +355,12 @@ int omega_list_matcher_compiler_destroy(
   fwrite(index_array, sizeof(uint32_t), compiler->table.size,
          compiler->compiled_fp);
   free(index_array);
+
+  // Write the populated control-byte array
+  fseek(compiler->compiled_fp, control_array_start, SEEK_SET);
+  fwrite(control_array, sizeof(uint8_t), compiler->table.size,
+    compiler->compiled_fp);
+  free(control_array);
 
   // Write the short matcher if it has any patterns
   if (compiler->smb.sm.len4 > 0 || compiler->smb.sm.len3 > 0 ||

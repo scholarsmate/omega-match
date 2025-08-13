@@ -16,7 +16,7 @@
 // --- Magic and version ---
 #define HEADER_MAGIC "0MGM4tCH"
 #define HEADER_MAGIC_SIZE (8)
-#define VERSION (1)
+#define VERSION (2)
 
 // --- Flags for compiled file header (32-bits) ---
 #define FLAG_IGNORE_CASE (1 << 1)
@@ -34,6 +34,12 @@
 // Magic header for short matcher files
 #define SHORT_MATCHER_MAGIC "0MG5HOrT"
 #define SHORT_MATCHER_MAGIC_SIZE (8)
+
+// --- Common bit constants ---
+// 0x01 replicated in all 8 bytes (useful for SIMD-like byte tricks in scalar)
+#define BYTE_REPLICATE_64 (0x0101010101010101ULL)
+// 0x80 in each byte position
+#define HIGH_BIT_MASK_64 (0x8080808080808080ULL)
 
 // --- Error Handling Macro ---
 #define ABORT(msg)                                                             \

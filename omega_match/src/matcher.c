@@ -76,6 +76,7 @@ struct omega_list_matcher_struct {
   compiled_header_t *header;
   const uint8_t *pattern_store;
   bloom_filter_t bf;
+  const uint8_t *control_bytes; // optional control-byte fingerprint array (v2+); NULL for v1 format files (backward compatibility)
   const uint32_t *index_array;
   const uint8_t *bucket_data;
   int case_insensitive;
@@ -198,6 +199,8 @@ static uint64_t scan_bucket_and_append(
   for (uint32_t j = 0; j < num_patterns; ++j) {
     const pattern_t *pat = (const pattern_t *)pattern_ptr;
     const uint32_t len = pat->len;
+  // Prefetch next pattern header to hide latency
+  OLM_PREFETCH(pattern_ptr + sizeof(pattern_t));
     
     // Early exit if pattern doesn't fit
     if (unlikely(len > remaining)) {
@@ -209,6 +212,8 @@ static uint64_t scan_bucket_and_append(
     pattern_ptr += sizeof(pattern_t);
     ++(*compares);
     
+  // Prefetch a small window ahead in the haystack to reduce misses
+  OLM_PREFETCH(hay_pos + 16);
     // Optimized comparison: check first/last bytes before full memcmp
     const uint8_t *pattern_data = pat_store + offset;
     
@@ -254,91 +259,6 @@ static uint64_t scan_bucket_and_append(
   return matches;
 }
 
-// --- Radix Sort for Matches ---
-#define OFFSET_BYTES ((int)sizeof(size_t))
-#define PASSES (OFFSET_BYTES + (int)sizeof(uint32_t))
-
-/*
- * Radix sort ordering rationale
- * --------------------------------
- * Pass sequence (LSD style, stable per pass):
- *   passes 0..3   : sort on bytes of ~len   (in effect, length DESC overall)
- *   remaining     : sort on bytes of offset (offset ASC overall)
- * Because later passes are more significant, the final ordering is:
- *   PRIMARY  : offset ascending
- *   SECONDARY: length descending (longest first for each starting offset)
- * This guarantees:
- *   - O(n) longest-only filter: keep first match per offset (already longest)
- *   - O(n) no-overlap filter  : single forward scan comparing only to last kept
- * Changing the ordering would either require extra bookkeeping or a second
- * grouping phase, so we retain this structure for minimal post-filter cost.
- */
-static void radix_sort_matches(const match_vector_t *restrict mv) {
-  const size_t n = mv->count;
-  if (unlikely(n < 2)) {
-    return; // nothing to sort
-  }
-
-  omega_match_result_t *tmp = malloc(n * sizeof(omega_match_result_t));
-  if (unlikely(!tmp)) {
-    ABORT("malloc for radix sort");
-  }
-
-  omega_match_result_t *in = mv->data;
-  omega_match_result_t *out = tmp;
-
-  for (int pass = 0; pass < PASSES; ++pass) {
-    size_t count[256] = {0};
-
-    /* 1. count occurrences of each byte value */
-    for (size_t i = 0; i < n; ++i) {
-      uint8_t key;
-      if (pass < 4) {
-        // First 4 passes: sort by ~len (descending match length)
-        key = (uint8_t)(~in[i].len >> (pass << 3) & 0xFFu);
-      } else {
-        // Remaining passes: sort by offset (ascending match position)
-        key = (uint8_t)(in[i].offset >> ((pass - 4) << 3) & 0xFFu);
-      }
-      ++count[key];
-    }
-
-    /* 2. exclusive prefix sum */
-    size_t sum = 0;
-    for (size_t b = 0; b < 256; ++b) {
-      const size_t c = count[b];
-      count[b] = sum;
-      sum += c;
-    }
-
-    /* 3. scatter */
-    for (size_t i = 0; i < n; ++i) {
-      uint8_t key;
-      if (pass < 4) {
-        // First 4 passes: sort by ~len (descending match length)
-        key = (uint8_t)(~in[i].len >> (pass << 3) & 0xFFu);
-      } else {
-        // Remaining passes: sort by offset (ascending match position)
-        key = (uint8_t)(in[i].offset >> ((pass - 4) << 3) & 0xFFu);
-      }
-      out[count[key]++] = in[i];
-    }
-
-    /* 4. swap roles */
-    omega_match_result_t *tmp_ptr = in;
-    in = out;
-    out = tmp_ptr;
-  }
-
-  // Copy results back to original buffer if needed
-  const int passes = PASSES;
-  if (passes % 2 == 1) {
-    memcpy(mv->data, tmp, n * sizeof(omega_match_result_t));
-  }
-
-  free(tmp);
-}
-
 /*-------------------------------------------------------------*/
 
 static int oa_matcher_load(const char *path, omega_list_matcher_t *matcher) {
@@ -380,6 +300,14 @@ static int oa_matcher_load(const char *path, omega_list_matcher_t *matcher) {
     return -1;
   }
   offset += HASH_HEADER_SIZE;
+
+  // For version >= 2, a control-byte array (table_size bytes) precedes index array
+  if (hdr->version >= 2) {
+    matcher->control_bytes = (const uint8_t *)(map + offset);
+    offset += hdr->table_size * sizeof(uint8_t);
+  } else {
+    matcher->control_bytes = NULL;
+  }
 
   // 4a. Index array
   matcher->index_array = (const uint32_t *)(map + offset);
@@ -559,43 +487,32 @@ int omega_list_matcher_destroy(omega_list_matcher_t *restrict matcher) {
   return 0;
 }
 
-// Strategy function type for filtering matches
-typedef int (*match_filter_fn)(const omega_match_result_t *prev,
-                               const omega_match_result_t *curr);
+// Removed legacy post-merge filter helpers (now handled during k-way merge)
 
-// Generic apply filter: keep matches where filter(prev, curr) is true
-static void apply_filter(match_vector_t *restrict v,
-                         const match_filter_fn filter) {
-  size_t write = 0;
-  for (size_t i = 0; i < v->count; ++i) {
-    if (write == 0 || filter(&v->data[write - 1], &v->data[i])) {
-      v->data[write++] = v->data[i];
-    }
+// finalize helper merging thread-local vectors
+// Run descriptor used by k-way merge and its comparator
+typedef struct { const omega_match_result_t *arr; size_t len; size_t idx; } run_t;
+OLM_ALWAYS_INLINE static int cmp_run(size_t a, size_t b, const run_t *restrict runs) {
+  const omega_match_result_t *ra = &runs[a].arr[runs[a].idx];
+  const omega_match_result_t *rb = &runs[b].arr[runs[b].idx];
+  if (ra->offset != rb->offset) return (ra->offset < rb->offset) ? -1 : 1;
+  if (ra->len == rb->len) return 0;
+  return (ra->len > rb->len) ? -1 : 1; // longer first when offsets equal
+}
+
+// Helper function to perform sift-down on a heap
+OLM_ALWAYS_INLINE static void sift_down(size_t *heap, size_t n, size_t start, const run_t *runs) {
+  size_t idx = start;
+  for (;;) {
+    size_t l = 2 * idx + 1, r = l + 1, smallest = idx;
+    if (l < n && cmp_run(heap[l], heap[smallest], runs) < 0) smallest = l;
+    if (r < n && cmp_run(heap[r], heap[smallest], runs) < 0) smallest = r;
+    if (smallest == idx) break;
+    size_t tmp = heap[idx];
+    heap[idx] = heap[smallest];
+    heap[smallest] = tmp;
+    idx = smallest;
   }
-  v->count = (uint32_t)write;
-}
-
-// Filter for longest-only: keep only the first occurrence per offset
-OLM_ALWAYS_INLINE static int filter_longest(const omega_match_result_t *prev,
-                                            const omega_match_result_t *curr) {
-  return curr->offset != prev->offset;
-}
-
-// Filter for no-overlap: keep match if it doesn't overlap previous
-OLM_ALWAYS_INLINE static int
-filter_no_overlap(const omega_match_result_t *prev,
-                  const omega_match_result_t *curr) {
-  return (curr->offset >= (prev->offset + prev->len));
-}
-
-// Apply longest-only: keep only the longest match at each offset
-OLM_ALWAYS_INLINE static void apply_longest(match_vector_t *restrict v) {
-  apply_filter(v, filter_longest);
-}
-
-// Apply no-overlap: drop any match that overlaps the previous one
-OLM_ALWAYS_INLINE static void apply_no_overlap(match_vector_t *restrict v) {
-  apply_filter(v, filter_no_overlap);
 }
 
 // finalize helper merging thread-local vectors
@@ -603,37 +520,120 @@ static omega_match_results_t *
 finalize_match_results(match_vector_t **restrict thread_matches,
                        const size_t num_chunks, const int no_overlap,
                        const int longest_only) {
+  // Compute total to preallocate output buffer
   size_t total = 0;
   for (size_t i = 0; i < num_chunks; ++i) {
     total += thread_matches[i]->count;
   }
-  match_vector_t *all = malloc(sizeof(match_vector_t));
-  init_match_vector(all);
-  reserve_match_vector(all, total);
+
+  // Prepare output vector
+  match_vector_t merged;
+  init_match_vector(&merged);
+  reserve_match_vector(&merged, total);
+
+  // K-way merge state: one cursor per chunk
+  run_t *runs = (run_t *)malloc(num_chunks * sizeof(run_t));
+  if (unlikely(!runs)) {
+    ABORT("finalize_match_results: malloc runs");
+  }
+  size_t active = 0;
   for (size_t i = 0; i < num_chunks; ++i) {
     match_vector_t *v = thread_matches[i];
-    for (size_t j = 0; j < v->count; ++j) {
-      append_match(all, &v->data[j]);
+    if (v->count > 0) {
+      runs[active].arr = v->data;
+      runs[active].len = v->count;
+      runs[active].idx = 0;
+      ++active;
     }
-    free_match_vector(v);
-    free(v);
+  }
+
+  // Min-heap over runs by (offset asc, len desc)
+  // Heap stores indices into runs[0..active)
+  if (active == 0) {
+    // Free inputs and return empty result
+    for (size_t i = 0; i < num_chunks; ++i) {
+      free_match_vector(thread_matches[i]);
+      free(thread_matches[i]);
+    }
+    free(thread_matches);
+    free(runs);
+    omega_match_results_t *out = (omega_match_results_t *)malloc(sizeof(*out));
+    out->count = 0;
+    out->matches = NULL;
+    return out;
+  }
+
+  size_t *heap = (size_t *)malloc(active * sizeof(size_t));
+  if (unlikely(!heap)) {
+    ABORT("finalize_match_results: malloc heap");
+  }
+
+  // Comparison helper defined at file scope: cmp_run
+
+  // Heapify
+  for (size_t i = 0; i < active; ++i) heap[i] = i;
+  for (ptrdiff_t i = (ptrdiff_t)active / 2 - 1; i >= 0; --i) {
+    // Sift-down from i
+    size_t start = (size_t)i;
+    sift_down(heap, active, start, runs);
+  }
+
+  // On-merge filtering state
+  uint64_t last_offset = (uint64_t)-1;
+  uint64_t last_end = 0;
+
+  // Merge loop
+  while (active > 0) {
+    // Pop min
+    size_t top = heap[0];
+    const omega_match_result_t *cur = &runs[top].arr[runs[top].idx];
+
+    // Apply on-merge filters in offset-asc, len-desc stream
+    int keep = 1;
+    if (longest_only && cur->offset == last_offset) {
+      keep = 0; // already emitted longest at this offset
+    }
+    if (keep && no_overlap && cur->offset < last_end) {
+      keep = 0;
+    }
+    if (keep) {
+      append_match(&merged, cur);
+      last_offset = cur->offset;
+      if (no_overlap) {
+        uint64_t end = cur->offset + cur->len;
+        if (end > last_end) last_end = end;
+      }
+    }
+
+    // Advance run
+    runs[top].idx++;
+    if (runs[top].idx >= runs[top].len) {
+      // Remove from heap
+      heap[0] = heap[active - 1];
+      --active;
+    } else {
+      // Restore heap property at root only
+  // Advance handled; restore heap property below via sift-down
+    }
+    if (active > 0) {
+      // Place root properly using sift-down
+      sift_down(heap, active, 0, runs);
+    }
+  }
+
+  // Free inputs
+  for (size_t i = 0; i < num_chunks; ++i) {
+    free_match_vector(thread_matches[i]);
+    free(thread_matches[i]);
   }
   free(thread_matches);
+  free(heap);
+  free(runs);
 
-  // qsort(all->data, all->count, sizeof(omega_match_result_t),
-  // compare_matches);
-  radix_sort_matches(all);
-  if (longest_only) {
-    apply_longest(all);
-  }
-  if (no_overlap) {
-    apply_no_overlap(all);
-  }
-
-  omega_match_results_t *out = malloc(sizeof(omega_match_results_t));
-  out->count = all->count;
-  out->matches = all->data;
-  free(all);
+  // Produce results
+  omega_match_results_t *out = (omega_match_results_t *)malloc(sizeof(*out));
+  out->count = merged.count;
+  out->matches = merged.data;
   return out;
 }
 
@@ -675,6 +675,8 @@ static OLM_ALWAYS_INLINE int binary_search_uint32_optimized(
   }
   return 0;
 }
+
+// --
 
 // Optimized short matcher queries with better branch prediction
 static OLM_ALWAYS_INLINE int
@@ -759,6 +761,41 @@ core_match(const omega_list_matcher_t *restrict matcher,
   const bool use_sm3 = sm->len3 > 0;
   const bool use_sm4 = sm->len4 > 0;
 
+  // Optional boundary fast-path: precompute boundary positions and iterate only them
+  size_t *boundary_pos = NULL;
+  size_t boundary_cnt = 0;
+  if (word_boundary) {
+    // First pass: count boundaries
+    size_t cnt = 0;
+    uint8_t prev_is_word = 0;
+    for (size_t i = 0; i < haystack_size; ++i) {
+      const uint8_t c = haystack[i];
+      const uint8_t curr_is_word = IS_WORD(c) ? 1 : 0;
+      if (curr_is_word != prev_is_word) {
+        ++cnt;
+      }
+      prev_is_word = curr_is_word;
+    }
+    if (cnt > 0) {
+      boundary_pos = (size_t *)malloc(cnt * sizeof(size_t));
+      if (unlikely(!boundary_pos)) {
+        ABORT("malloc boundary_pos");
+      }
+      // Second pass: fill positions
+      size_t w = 0;
+      prev_is_word = 0;
+      for (size_t i = 0; i < haystack_size; ++i) {
+        const uint8_t c = haystack[i];
+        const uint8_t curr_is_word = IS_WORD(c) ? 1 : 0;
+        if (curr_is_word != prev_is_word) {
+          boundary_pos[w++] = i;
+        }
+        prev_is_word = curr_is_word;
+      }
+      boundary_cnt = w;
+    }
+  }
+
 #ifdef OMEGA_MATCH_USE_OPENMP
 #pragma omp parallel reduction(+ : total_attempts, total_hits, total_misses,   \
                                    total_filtered, total_comparisons)
@@ -775,23 +812,115 @@ core_match(const omega_list_matcher_t *restrict matcher,
     thread_matches[tid] = local;
     const ptrdiff_t hsize = (ptrdiff_t)haystack_size;
 
-    ptrdiff_t pos;
+    if (word_boundary && boundary_cnt > 0) {
+      // MSVC requires signed integral type for OpenMP loop index (C3016)
+      ptrdiff_t bi;
 #ifdef OMEGA_MATCH_USE_OPENMP
 #pragma omp for schedule(runtime)
 #endif
-    for (pos = 0; pos < hsize; ++pos) {
-      // Word boundary optimization: skip non-boundary positions early
-      const uint8_t curr_char = haystack[pos];
-      if (word_boundary) {
-        const bool curr_is_word = IS_WORD(curr_char);
-        const bool prev_is_word = (pos > 0) ? IS_WORD(haystack[pos - 1]) : false;
-        if (curr_is_word == prev_is_word) {
-          continue;
+      for (bi = 0; bi < (ptrdiff_t)boundary_cnt; ++bi) {
+        const ptrdiff_t pos = (ptrdiff_t)boundary_pos[bi];
+        const uint8_t *restrict h_ptr = haystack + pos;
+        const size_t remaining = hsize - pos;
+
+        // Hash table for patterns ≥ 5 with optimized bloom filter check
+        if (largest >= 5 && remaining >= 4) {
+          ++total_attempts;
+          const uint32_t cand = pack_gram(h_ptr);
+          if (unlikely(!bloom_filter_query(bf, cand))) {
+            ++total_filtered;
+          } else {
+            uint32_t slot_offset;
+            if (!probe_bucket(matcher->control_bytes, idx_arr, bucket, table_mask,
+                             cand, &slot_offset)) {
+              ++total_misses;
+            } else {
+              ++total_hits;
+              scan_bucket_and_append(bucket + slot_offset, pat_st, local,
+                                     haystack, (size_t)hsize, pos, word_boundary,
+                                     word_prefix, word_suffix, line_start,
+                                     line_end, &total_comparisons);
+            }
+          }
+        }
+
+        // Short matcher for patterns of length 1–4
+        if (use_sm) {
+          const bool word_prefix_ok = !word_prefix || (pos == 0 || !IS_WORD(haystack[pos - 1]));
+          const bool line_start_ok = !line_start || is_at_line_start(haystack, pos);
+
+          if (use_sm4 && remaining >= 4) {
+            if (short_matcher_query4_fast(sm, h_ptr)) {
+              const bool word_boundary_ok = !word_boundary || !IS_WORD(haystack[pos + 4]);
+              const bool word_suffix_ok = !word_suffix || (pos + 4 >= hsize || !IS_WORD(haystack[pos + 4]));
+              const bool line_end_ok = !line_end || is_at_line_end(haystack, (size_t)hsize, pos, 4);
+              if (word_boundary_ok && word_prefix_ok && word_suffix_ok && line_start_ok && line_end_ok) {
+                ++total_hits;
+                append_match(local, &(omega_match_result_t){ .offset = pos, .len = 4, .match = h_ptr });
+              } else {
+                ++total_misses;
+              }
+            }
+          }
+          if (use_sm3 && remaining >= 3) {
+            if (short_matcher_query3_fast(sm, h_ptr)) {
+              const bool word_boundary_ok = !word_boundary || !IS_WORD(haystack[pos + 3]);
+              const bool word_suffix_ok = !word_suffix || (pos + 3 >= hsize || !IS_WORD(haystack[pos + 3]));
+              const bool line_end_ok = !line_end || is_at_line_end(haystack, (size_t)hsize, pos, 3);
+              if (word_boundary_ok && word_prefix_ok && word_suffix_ok && line_start_ok && line_end_ok) {
+                ++total_hits;
+                append_match(local, &(omega_match_result_t){ .offset = pos, .len = 3, .match = h_ptr });
+              } else {
+                ++total_misses;
+              }
+            }
+          }
+          if (use_sm2 && remaining >= 2) {
+            if (short_matcher_query2_fast(sm, h_ptr)) {
+              const bool word_boundary_ok = !word_boundary || !IS_WORD(haystack[pos + 2]);
+              const bool word_suffix_ok = !word_suffix || (pos + 2 >= hsize || !IS_WORD(haystack[pos + 2]));
+              const bool line_end_ok = !line_end || is_at_line_end(haystack, (size_t)hsize, pos, 2);
+              if (word_boundary_ok && word_prefix_ok && word_suffix_ok && line_start_ok && line_end_ok) {
+                ++total_hits;
+                append_match(local, &(omega_match_result_t){ .offset = pos, .len = 2, .match = h_ptr });
+              } else {
+                ++total_misses;
+              }
+            }
+          }
+          if (use_sm1) {
+            if (short_matcher_query1_fast(sm, *h_ptr)) {
+              const bool word_boundary_ok = !word_boundary || (pos + 1 >= hsize || !IS_WORD(haystack[pos + 1]));
+              const bool word_suffix_ok = !word_suffix || (pos + 1 >= hsize || !IS_WORD(haystack[pos + 1]));
+              const bool line_end_ok = !line_end || is_at_line_end(haystack, (size_t)hsize, pos, 1);
+              if (word_boundary_ok && word_prefix_ok && word_suffix_ok && line_start_ok && line_end_ok) {
+                ++total_hits;
+                append_match(local, &(omega_match_result_t){ .offset = pos, .len = 1, .match = h_ptr });
+              } else {
+                ++total_misses;
+              }
+            }
+          }
         }
       }
+    } else {
+      ptrdiff_t pos;
+#ifdef OMEGA_MATCH_USE_OPENMP
+#pragma omp for schedule(runtime)
+#endif
+      for (pos = 0; pos < hsize; ++pos) {
+        // Word boundary optimization: skip non-boundary positions early
+        const uint8_t curr_char = haystack[pos];
+        if (word_boundary) {
+          const bool curr_is_word = IS_WORD(curr_char);
+          const bool prev_is_word = (pos > 0) ? IS_WORD(haystack[pos - 1]) : false;
+          if (curr_is_word == prev_is_word) {
+            continue;
+          }
+        }
 
-      const uint8_t *restrict h_ptr = haystack + pos;
-      const size_t remaining = hsize - pos;
+        const uint8_t *restrict h_ptr = haystack + pos;
+        const size_t remaining = hsize - pos;
 
       // Hash table for patterns ≥ 5 with optimized bloom filter check
       if (largest >= 5 && remaining >= 4) {
@@ -803,7 +932,8 @@ core_match(const omega_list_matcher_t *restrict matcher,
           ++total_filtered;
         } else {
           uint32_t slot_offset;
-          if (!probe_bucket(idx_arr, bucket, table_mask, cand, &slot_offset)) {
+          if (!probe_bucket(matcher->control_bytes, idx_arr, bucket, table_mask,
+                           cand, &slot_offset)) {
             ++total_misses;
           } else {
             ++total_hits;
@@ -815,8 +945,8 @@ core_match(const omega_list_matcher_t *restrict matcher,
         }
       }
 
-      // Short matcher for patterns of length 1–4 with optimizations
-      if (use_sm) {
+  // Short matcher for patterns of length 1–4 with optimizations
+  if (use_sm) {
         // Pre-compute common boundary checks for this position
         const bool word_prefix_ok = !word_prefix || (pos == 0 || !IS_WORD(haystack[pos - 1]));
         const bool line_start_ok = !line_start || is_at_line_start(haystack, pos);
@@ -892,12 +1022,17 @@ core_match(const omega_list_matcher_t *restrict matcher,
             }
           }
         }
+        }
       }
     }
   }
 
   omega_match_results_t *results = finalize_match_results(
       thread_matches, max_threads, no_overlap, longest_only);
+
+  if (boundary_pos) {
+    free(boundary_pos);
+  }
 
   if (matcher->stats) {
     matcher->stats->total_attempts += total_attempts;
@@ -985,9 +1120,20 @@ omega_match_results_t *omega_list_matcher_match(
     const size_t win = rem < chunk_size ? rem : chunk_size;
 
     uint32_t processed_len = 0;
-    const uint8_t *normalized =
-        transform_apply(matcher->transform_table, haystack + base,
-                        (uint32_t)win, &processed_len, position_map);
+    const uint8_t *normalized = NULL;
+    // Fast-path hoist: if transform is case-insensitive only (no punctuation
+    // skipping and no whitespace elision), avoid building a backmap and reuse
+    // the transform buffer directly with 1:1 mapping semantics.
+    const int flags = matcher->header->flags;
+    if ((flags & FLAG_IGNORE_CASE) && !(flags & FLAG_IGNORE_PUNCTUATION) &&
+        !(flags & FLAG_ELIDE_WHITESPACE)) {
+      normalized = transform_apply(matcher->transform_table, haystack + base,
+                                   (uint32_t)win, &processed_len, NULL);
+    } else {
+      normalized = transform_apply(matcher->transform_table, haystack + base,
+                                   (uint32_t)win, &processed_len,
+                                   position_map);
+    }
 
     omega_match_results_t *r = core_match(
         matcher, normalized, processed_len, no_overlap, longest_only,
@@ -998,7 +1144,7 @@ omega_match_results_t *omega_list_matcher_match(
     match_vector_t *local = calloc(1, sizeof(*local));
     reserve_match_vector(local, r->count);
 
-    if (position_map) {
+  if (position_map) {
       // Remap the offsets back to the original haystack
       for (size_t i = 0; i < r->count; ++i) {
         omega_match_result_t *m = &r->matches[i];
@@ -1010,7 +1156,7 @@ omega_match_results_t *omega_list_matcher_match(
         m->match = haystack + m->offset;
         append_match(local, m);
       }
-    } else {
+  } else {
       // 1-to-1 mapping from normalized to original haystack
       for (size_t i = 0; i < r->count; ++i) {
         omega_match_result_t *m = &r->matches[i];
