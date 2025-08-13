@@ -268,10 +268,10 @@ if (APPLE)
     endif()
 endif()
 
-# Optionally require OpenMP (used by packaging/CI to ensure parallel support gets built)
-option(OMEGA_MATCH_REQUIRE_OPENMP "Fail configure if OpenMP is not found" OFF)
+# Require OpenMP by default (can be disabled with -DOMEGA_MATCH_REQUIRE_OPENMP=OFF if needed)
+option(OMEGA_MATCH_REQUIRE_OPENMP "Fail configure if OpenMP is not found" ON)
 
-# Try to find OpenMP; allow building without it (single-threaded) unless explicitly required
+# Try to find OpenMP; fail if not found (unless explicitly disabled)
 find_package(OpenMP)
 if (OpenMP_C_FOUND)
     message(STATUS "OpenMP found: enabling parallel matching")
