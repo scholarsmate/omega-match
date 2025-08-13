@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(omega_match VERSION 0.1.0 LANGUAGES C)
+project(omega_match VERSION 0.2.1 LANGUAGES C)
 
 # Project Version - try to determine from git first, then fallback to hardcoded
 find_package(Git QUIET)

@@ -591,10 +591,67 @@ jobs:
           name: omega_match-universal-wheel
           path: dist/
 
+      - name: Verify existing PyPI wheel hash (if already published)
+        run: |
+          set -euo pipefail
+          WHEEL=$(ls dist/*.whl)
+          echo "Local wheel: $WHEEL"
+          # Extract version from filename omega_match-<version>-py3-none-any.whl (shell safe parsing)
+          fname=$(basename "$WHEEL")
+          ver=${fname#omega_match-}
+          ver=${ver%-py3-none-any.whl}
+          echo "Parsed version: $ver"
+          PYPI_URL="https://pypi.org/pypi/omega-match/${ver}/json"
+          echo "Querying PyPI: $PYPI_URL"
+          if ! curl -fsS "$PYPI_URL" -o pypi.json; then
+            echo "Version $ver not found on PyPI yet (fresh publish)."; exit 0
+          fi
+          # Use Python to compare hashes (blake2_256 + sha256)
+          export WHEEL="$WHEEL"
+          python3 - <<'EOF'
+            import json, hashlib, sys, os
+
+            wheel_path = os.environ.get('WHEEL')
+            if not wheel_path or not os.path.isfile(wheel_path):
+              print('ERROR: WHEEL env var not set or file missing', file=sys.stderr)
+              sys.exit(1)
+            base = os.path.basename(wheel_path)
+            with open('pypi.json','r',encoding='utf-8') as f:
+              data=json.load(f)
+            target = None
+            for ver_key, files in data.get('releases', {}).items():
+              for file in files:
+                if file.get('filename') == base:
+                  target = file
+                  break
+              if target: break
+            if not target:
+              print('Wheel filename not yet on PyPI; proceeding with fresh publish.')
+              sys.exit(0)
+            print('Wheel already on PyPI; verifying hashes...')
+            data_bytes = open(wheel_path,'rb').read()
+            blake_local = hashlib.blake2b(data_bytes, digest_size=32).hexdigest()
+            sha256_local = hashlib.sha256(data_bytes).hexdigest()
+            blake_pypi = target['digests'].get('blake2_256')
+            sha256_pypi = target['digests'].get('sha256')
+            print(' Local blake2_256:', blake_local)
+            print(' PyPI  blake2_256:', blake_pypi)
+            print(' Local sha256    :', sha256_local)
+            print(' PyPI  sha256    :', sha256_pypi)
+            if blake_local != blake_pypi or sha256_local != sha256_pypi:
+              print('\nERROR: Local wheel hash differs from already published wheel on PyPI. Aborting publish to avoid inconsistent artifacts.', file=sys.stderr)
+              sys.exit(2)
+            print('Hashes match existing PyPI wheel; safe to skip re-upload.')
+          EOF
+        shell: bash
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
+          # Allow re-running the release workflow with the same tag/version
+          # without failing if the wheel for this version was already uploaded.
+          skip-existing: true
   
   create-release:
     needs: [build-artifacts, test-universal-wheel, publish-to-pypi]
