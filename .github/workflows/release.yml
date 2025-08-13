@@ -607,6 +607,8 @@ jobs:
       with:
         path: artifacts/
     
+  # Variant artifacts now have unique names from CPack (variant suffix baked in)
+    
     - name: Create Release
       uses: softprops/action-gh-release@v1
       with:

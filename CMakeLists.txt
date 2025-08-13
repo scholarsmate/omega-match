@@ -524,8 +524,24 @@ include(InstallRequiredSystemLibraries)
 set(CPACK_PACKAGE_NAME "omega_match")
 set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
 set(CPACK_PACKAGE_CONTACT "omega_match maintainers")
+
+# Provide variant suffix for PGO USE phase builds to ensure unique artifact names.
+# This avoids post-build renaming in CI and prevents GitHub Release asset collisions
+# when multiple optimized variants (e.g., GCC PGO & Clang PGO) are uploaded.
+set(PACKAGE_VARIANT_SUFFIX "")
+if (ENABLE_PGO_USE)
+    if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+        set(PACKAGE_VARIANT_SUFFIX "-gcc-pgo")
+    elseif (CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        set(PACKAGE_VARIANT_SUFFIX "-clang-pgo")
+    elseif (CMAKE_C_COMPILER_ID STREQUAL "MSVC")
+        # Currently we do not upload separate MSVC PGO installer to releases, but reserve suffix for future use
+        set(PACKAGE_VARIANT_SUFFIX "-msvc-pgo")
+    endif()
+endif()
+
 set(CPACK_PACKAGE_FILE_NAME
-    "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
+    "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}${PACKAGE_VARIANT_SUFFIX}")
 set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
