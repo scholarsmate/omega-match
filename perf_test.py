@@ -31,8 +31,12 @@ add_quiet: bool = False
 
 
 def get_binary_paths():
-    """Detect the correct binary paths for different build systems."""
-    # CMake builds
+    """Detect the correct binary paths for different build systems.
+
+    Returns:
+        tuple[str|None, str|None, str|None]: (debug, release, release_pgo)
+    """
+    # CMake builds (common patterns)
     debug_candidates = [
         "./build-msvc-debug/Debug/olm.exe",
         "./build-gcc-debug/olm",
@@ -47,21 +51,20 @@ def get_binary_paths():
         "./cmake-build-release/olm.exe",
         "./cmake-build-release/olm",
     ]
+    # PGO "use" phase builds (naming mirrors existing build-* dirs)
+    pgo_release_candidates = [
+        "./build-msvc-pgo-use/Release/olm.exe",
+        "./build-gcc-pgo-use/olm",
+        "./build-clang-pgo-use/olm",
+        # Fallbacks in case a multi-config or alt naming is used
+        "./build-msvc-pgo-use/olm.exe",
+    ]
 
-    debug_build = None
-    release_build = None
+    debug_build = next((c for c in debug_candidates if os.path.isfile(c)), None)
+    release_build = next((c for c in release_candidates if os.path.isfile(c)), None)
+    pgo_release_build = next((c for c in pgo_release_candidates if os.path.isfile(c)), None)
 
-    for candidate in debug_candidates:
-        if os.path.isfile(candidate):
-            debug_build = candidate
-            break
-
-    for candidate in release_candidates:
-        if os.path.isfile(candidate):
-            release_build = candidate
-            break
-
-    return debug_build, release_build
+    return debug_build, release_build, pgo_release_build
 # Cache for binary capability checks
 _BINARY_QUIET_SUPPORT_CACHE: dict[str, bool] = {}
 
@@ -81,7 +84,7 @@ def binary_supports_quiet(binary: str) -> bool:
         return False
 
 
-DEBUG_BUILD, RELEASE_BUILD = get_binary_paths()
+DEBUG_BUILD, RELEASE_BUILD, PGO_RELEASE_BUILD = get_binary_paths()
 CSV_FILE = "./perf_results.csv"
 OMP_THREADS = 8
 DEFAULT_COMPILED_EXT = ".olm"
@@ -427,6 +430,11 @@ Examples:
         type=str,
         help="Explicit path to release/optimized olm binary to benchmark (overrides auto-detect)",
     )
+    parser.add_argument(
+        "--pgo-binary",
+        type=str,
+        help="Explicit path to release+PGO olm binary to benchmark (overrides auto-detect)",
+    )
 
     parser.add_argument(
         "--debug-binary",
@@ -483,10 +491,13 @@ def main():
     # Optional binary overrides (use locals to avoid reassigning module constants)
     debug_bin = DEBUG_BUILD
     release_bin = RELEASE_BUILD
+    pgo_bin = PGO_RELEASE_BUILD
     if args.release_binary:
         release_bin = args.release_binary
     if args.debug_binary is not None:
         debug_bin = args.debug_binary
+    if args.pgo_binary:
+        pgo_bin = args.pgo_binary
 
     # Show binary detection results
     if not args.no_debug:
@@ -499,6 +510,11 @@ def main():
         print(f"[INFO] Release binary: {release_bin}")
     else:
         print("[WARNING] Release binary not found")
+
+    if pgo_bin:
+        print(f"[INFO] Release+PGO binary: {pgo_bin}")
+    else:
+        print("[INFO] Release+PGO binary not found (optional)")
 
     # Detect grep tool and inform user
     if not args.no_grep:
@@ -519,56 +535,35 @@ def main():
     print()
 
     # Adjust table headers based on whether grep is enabled
+    # Dynamically build table headers depending on available binaries
+    header_parts = ["Test Case"]
+    if not args.no_debug:
+        header_parts.append("Debug MB/s")
+    header_parts.append("Release MB/s")
+    if pgo_bin:
+        header_parts.append("PGO MB/s")
     if args.no_grep:
-        if args.no_debug:
-            print(f"{'Test Case':56} | {'Release MB/s':12}")
-            print("-" * 73)
-        else:
-            print(f"{'Test Case':56} | {'Debug MB/s':12} | {'Release MB/s':12}")
-            print("-" * 85)
+        pass
     else:
-        if args.no_debug:
-            print(
-                f"{'Test Case':56} | {'Release MB/s':12} | {'Grep MB/s':12} | {'Ratio':8} | {'Compare':8}"
-            )
-            print("-" * 118)
-        else:
-            print(
-                f"{'Test Case':56} | {'Debug MB/s':12} | {'Release MB/s':12} | {'Grep MB/s':12} | {'Ratio':8} | {'Compare':8}"
-            )
-            print("-" * 130)
+        header_parts.extend(["Grep MB/s", "Ratio", "Compare"])
+
+    # Compute total width for separator (approx)
+    header_line = " | ".join(f"{h:>12}" if h != "Test Case" else f"{h:56}" for h in header_parts)
+    print(header_line)
+    print("-" * (len(header_line)))
 
     with open(CSV_FILE, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.writer(csvfile)
-        if args.no_grep:
-            if args.no_debug:
-                writer.writerow(["test_case", "threads", "release_mb_s"])
-            else:
-                writer.writerow(["test_case", "threads", "debug_mb_s", "release_mb_s"])
-        else:
-            if args.no_debug:
-                writer.writerow(
-                    [
-                        "test_case",
-                        "threads",
-                        "release_mb_s",
-                        "grep_mb_s",
-                        "release_grep_ratio",
-                        "compare_status",
-                    ]
-                )
-            else:
-                writer.writerow(
-                    [
-                        "test_case",
-                        "threads",
-                        "debug_mb_s",
-                        "release_mb_s",
-                        "grep_mb_s",
-                        "release_grep_ratio",
-                        "compare_status",
-                    ]
-                )
+        # CSV header
+        csv_header = ["test_case", "threads"]
+        if not args.no_debug:
+            csv_header.append("debug_mb_s")
+        csv_header.append("release_mb_s")
+        if pgo_bin:
+            csv_header.append("pgo_mb_s")
+        if not args.no_grep:
+            csv_header.extend(["grep_mb_s", "release_grep_ratio", "compare_status"])
+        writer.writerow(csv_header)
 
         for test_name, flags in tests_to_run.items():
             if not args.no_debug:
@@ -597,20 +592,37 @@ def main():
             if args.show_status:
                 print(f"\r{' ' * 120}\r", end="", flush=True)
 
+            # Run PGO release build if present
+            if pgo_bin:
+                if args.show_status:
+                    print(
+                        f"\r{' ' * 120}\r[STATUS] Running PGO Release {test_name} with {os.path.basename(pgo_bin)}...",
+                        end="",
+                        flush=True,
+                    )
+                pgo_result = run_perf_test(pgo_bin, flags, False, f"PGO Release {test_name}")
+            else:
+                pgo_result = "N/A"
+
             if args.no_grep:
-                if args.no_debug:
-                    print(f"{test_name:56} | {release_result:12}")
-                    writer.writerow([test_name, OMP_THREADS, release_result])
-                else:
-                    print(f"{test_name:56} | {debug_result:12} | {release_result:12}")
-                    writer.writerow([test_name, OMP_THREADS, debug_result, release_result])
+                row_display_parts = [f"{test_name:56}"]
+                csv_row: List[object] = [test_name, OMP_THREADS]
+                if not args.no_debug:
+                    row_display_parts.append(f"{debug_result:12}")
+                    csv_row.append(debug_result)
+                row_display_parts.append(f"{release_result:12}")
+                csv_row.append(release_result)
+                if pgo_bin:
+                    row_display_parts.append(f"{pgo_result:12}")
+                    csv_row.append(pgo_result)
+                print(" | ".join(row_display_parts))
+                writer.writerow(csv_row)
             else:
                 grep_result = "N/A"
                 cmp_status = "N/A"
                 if test_name in GREP_VARIANTS and grep_tool:
                     grep_flags = GREP_VARIANTS[test_name]
                     grep_result = run_grep_perf_test(grep_flags, test_name, args.show_status)
-                    # Show comparison status
                     if args.show_status:
                         print(
                             f"\r{' ' * 120}\r[STATUS] Comparing {test_name} outputs...",
@@ -618,71 +630,43 @@ def main():
                             flush=True,
                         )
                     if release_bin:
-                        cmp_status = compare_outputs(
-                            release_bin, flags, test_name, grep_flags
-                        )
+                        cmp_status = compare_outputs(release_bin, flags, test_name, grep_flags)
 
-                # Clear any remaining status line before printing the table row
                 if args.show_status:
                     print(f"\r{' ' * 120}\r", end="", flush=True)
 
-                # Calculate ratio (Release OLM / Grep)
-                ratio = 0
+                # Ratio uses (non-PGO) release build for continuity
                 try:
-                    if grep_result != "N/A" and grep_result != "ERR" and grep_result != "Inf":
-                        release_val = float(release_result) if release_result not in ["N/A", "ERR", "Inf"] else 0
-                        grep_val = float(grep_result) if grep_result not in ["N/A", "ERR", "Inf"] else 0
-                        if grep_val > 0:
-                            ratio = release_val / grep_val
-                            ratio_str = f"{ratio:.2f}x"
-                        else:
-                            ratio_str = "N/A"
+                    if grep_result not in ("N/A", "ERR", "Inf") and release_result not in ("N/A", "ERR", "Inf"):
+                        release_val = float(release_result)
+                        grep_val = float(grep_result)
+                        ratio = release_val / grep_val if grep_val > 0 else 0
+                        ratio_str = f"{ratio:.2f}x" if grep_val > 0 else "N/A"
                     else:
+                        ratio = 0
                         ratio_str = "N/A"
                 except (ValueError, ZeroDivisionError):
+                    ratio = 0
                     ratio_str = "N/A"
 
-                if args.no_debug:
-                    print(
-                        f"{test_name:56} | {release_result:12} | {grep_result:12} | {ratio_str:8} | {cmp_status:8}"
-                    )
-                    writer.writerow(
-                        [
-                            test_name,
-                            OMP_THREADS,
-                            release_result,
-                            grep_result,
-                            ratio,
-                            cmp_status,
-                        ]
-                    )
-                else:
-                    print(
-                        f"{test_name:56} | {debug_result:12} | {release_result:12} | {grep_result:12} | {ratio_str:8} | {cmp_status:8}"
-                    )
-                    writer.writerow(
-                        [
-                            test_name,
-                            OMP_THREADS,
-                            debug_result,
-                            release_result,
-                            grep_result,
-                            ratio,
-                            cmp_status,
-                        ]
-                    )
+                row_display_parts = [f"{test_name:56}"]
+                csv_row: List[object] = [test_name, OMP_THREADS]
+                if not args.no_debug:
+                    row_display_parts.append(f"{debug_result:12}")
+                    csv_row.append(debug_result)
+                row_display_parts.append(f"{release_result:12}")
+                csv_row.append(release_result)
+                if pgo_bin:
+                    row_display_parts.append(f"{pgo_result:12}")
+                    csv_row.append(pgo_result)
+                row_display_parts.extend([f"{grep_result:12}", f"{ratio_str:8}", f"{cmp_status:8}"])
+                csv_row.extend([grep_result, ratio, cmp_status])
+                print(" | ".join(row_display_parts))
+                writer.writerow(csv_row)
 
     # Adjust footer line based on whether grep is enabled
-    if args.no_grep:
-        if args.no_debug:
-            print("-" * 73)
-        else:
-            print("-" * 85)
-    else:
-        if args.no_debug:
-            print("-" * 118)
-        else:
-            print("-" * 130)
+    # Footer separator (reuse header length)
+    print("-" * len(header_line))
 
     print(f"[INFO] Performance test completed. Results saved to {CSV_FILE}.")
 
