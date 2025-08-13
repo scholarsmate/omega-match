@@ -328,7 +328,8 @@ int probe_bucket(const uint8_t *restrict control_bytes,
 #else
     // Scalar 16-byte blocks using bit tricks
   const uint8_t cand_fp = (uint8_t)((hash_uint32(cand) >> 24) | 1u);
-  // Use named constants for scalar byte tricks
+  // Use named constants for scalar byte tricks (see common.h for definitions)
+  // BYTE_REPLICATE_64: 0x0101010101010101ULL, replicates a byte across all bytes of a 64-bit word
   const uint64_t rep = BYTE_REPLICATE_64 * cand_fp;
     uint32_t probed = 0;
     while (probed < size) {

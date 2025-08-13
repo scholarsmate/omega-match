@@ -97,7 +97,6 @@ def match_mode(
             output_stream = open(output_file, "w", encoding="utf-8", newline="\n")
         elif output_file and output_file.upper() == "NUL":
             # Handle NUL output (discard results)
-            import os
             if os.name == "nt":
                 output_stream = open("NUL", "w")
             else:

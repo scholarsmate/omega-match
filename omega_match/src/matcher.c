@@ -76,7 +76,7 @@ struct omega_list_matcher_struct {
   compiled_header_t *header;
   const uint8_t *pattern_store;
   bloom_filter_t bf;
-  const uint8_t *control_bytes; // optional control-byte fingerprint array (v2+)
+  const uint8_t *control_bytes; // optional control-byte fingerprint array (v2+); NULL for v1 format files (backward compatibility)
   const uint32_t *index_array;
   const uint8_t *bucket_data;
   int case_insensitive;
