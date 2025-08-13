@@ -217,23 +217,14 @@ endif()
 
     # Export all symbols for Windows DLL
     if (WIN32)
-        # During PGO builds, disable automatic symbol export and use explicit .def file
-        # to avoid CMake crashes when analyzing PGO-instrumented object files
-        if (ENABLE_PGO_GENERATE OR ENABLE_PGO_USE)
-            set_target_properties(omega_match_shared PROPERTIES
-                ARCHIVE_OUTPUT_NAME omega_match        # omega_match.lib (import library)
-                RUNTIME_OUTPUT_NAME omega_match        # omega_match.dll
-            )
-            # Use explicit .def file for symbol export during PGO builds
-            target_sources(omega_match_shared PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/omega_match_shared.def)
-        else()
-            # Enable automatic symbol export on Windows for non-PGO builds
-            set_target_properties(omega_match_shared PROPERTIES
-                WINDOWS_EXPORT_ALL_SYMBOLS TRUE
-                ARCHIVE_OUTPUT_NAME omega_match        # omega_match.lib (import library)
-                RUNTIME_OUTPUT_NAME omega_match        # omega_match.dll
-            )
-        endif()
+        # Always use explicit .def file for symbol export on Windows
+        # to avoid CMake crashes with WINDOWS_EXPORT_ALL_SYMBOLS in various CI environments
+        set_target_properties(omega_match_shared PROPERTIES
+            ARCHIVE_OUTPUT_NAME omega_match        # omega_match.lib (import library)
+            RUNTIME_OUTPUT_NAME omega_match        # omega_match.dll
+        )
+        # Use explicit .def file for reliable symbol export across all build configurations
+        target_sources(omega_match_shared PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/omega_match_shared.def)
     endif ()
 
     # Create the main alias for external use (defaults to shared when available)
