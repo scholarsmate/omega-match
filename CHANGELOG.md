@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Callgrind helpers and reporting tools: `profile_callgrind`, `profile_callgrind_report`, `profile_callgrind_compare` targets and `scripts/callgrind_report.py`.
 - A/B performance comparison helper `scripts/compare_branches.py`.
 - CMake options to toggle LTO/IPO and tuning: `OMEGA_MATCH_ENABLE_LTO`, `OMEGA_MATCH_MARCH_NATIVE`, `OMEGA_MATCH_MTUNE_NATIVE`.
+- Python CLI tool (`bindings/python/olm.py`) with `--output` option for feature parity with native CLI.
+- PGO library variant naming and automatic selection in Python bindings for optimal performance.
 
 ### Changed
 - Persisted compiled format bumped to v2: control-byte fingerprint array precedes index array; loader/compiler updated.
@@ -21,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bloom filter tuned to 20 bits/entry; improved word sharing and prefetching.
 - Portable prefetch macro refined for MSVC and GCC/Clang.
 - OpenMP handling: optional by default with `OMEGA_MATCH_REQUIRE_OPENMP` to enforce in CI/packaging.
+- Python bindings now automatically select and use PGO-optimized libraries when available.
 
 ### Performance
 - Faster candidate probing and bucket scans; fewer cache misses.
@@ -30,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hardened PGO workflow (GCC/Clang/MSVC) with broader `llvm-profdata` discovery and non-fatal missing-profile handling for Clang.
 - macOS libomp discovery hints; MSVC OpenMP loop index fix.
 - Perf harness improvements: flags cleanup, binary overrides, grep detection, and CSV outputs.
+
+### Fixed
+- MSVC PGO build failure caused by CMake WINDOWS_EXPORT_ALL_SYMBOLS crash during instrumentation phase.
+- Added explicit `.def` file for symbol export during MSVC PGO builds to avoid CMake object file analysis issues.
+- Implemented hybrid optimization strategy: PGO for executable, standard optimization for shared library to work around MSVC profile database limitations.
 
 ### Notes
 - The compiled pattern store file layout changed (format v2). Recompile pattern stores before use.
