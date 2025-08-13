@@ -40,7 +40,7 @@ cmake --preset release -DOMEGA_MATCH_REQUIRE_OPENMP=ON
 
 ### Language Bindings Build (libraries only)
 ```sh
-cmake --preset release -DOLM_BUILD_CLI=OFF
+cmake --preset release -DOMEGA_MATCH_BUILD_CLI=OFF
 cmake --build --preset release
 # The build directory depends on the preset, e.g., 'build-gcc-release' for the 'release' preset
 cmake --install build-gcc-release --prefix /usr/local

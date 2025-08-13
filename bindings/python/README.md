@@ -160,9 +160,12 @@ This project uses GitHub Actions for continuous integration and automated wheel 
 #### Creating a Release
 
 ```bash
-# Create and push a version tag
-git tag v0.1.0
-git push origin v0.1.0
+# Create and push a version tag (replace with the new version)
+git tag v0.2.1
+git push origin v0.2.1
+# Or, for future releases:
+# git tag vX.Y.Z
+# git push origin vX.Y.Z
 ```
 
 This will automatically trigger the CI/CD pipeline to build cross-platform wheels and attach them to a GitHub release.

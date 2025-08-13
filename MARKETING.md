@@ -10,7 +10,7 @@ OmegaMatch is a fast, embeddable, multi‑pattern exact matcher for products and
 |------------|------------------------|
 | Memory‑mapped compiled pattern store | Compile once; deploy everywhere; near-zero warmup. |
 | Multi-threaded (OpenMP) core | Scales with cores for batch or streaming workloads. |
-| Profile-Guided Optimization (PGO) builds | Maximum performance on Windows (MSVC), Linux (GCC/Clang) with training-optimized code. |
+| Profile-Guided Optimization (PGO) builds | Optional variants (Linux: GCC & Clang, Windows: MSVC) yielding typical +5–20% throughput on representative workloads. |
 | Two-tier pipeline (Bloom + hash table) | Filters >90% of non-matches early; fewer cache misses; higher throughput. |
 | Specialized short‑pattern accelerator | Ultra-fast handling of 1–4 byte patterns (bitmap + binary search). |
 | Rich post-filters | Word/line anchors, longest-only, no-overlap, prefix/suffix constraints. |
@@ -165,11 +165,18 @@ omega_list_matcher_destroy(m);
 
 ## Quick Start (Python)
 ```python
-from omega_match import OmegaMatch
-m = OmegaMatch("patterns.txt", case_insensitive=True, ignore_punctuation=False, elide_whitespace=False)
-results = m.match(open("haystack.txt","rb").read(), word_boundary=True, longest_only=True, no_overlap=True)
-for off, length in results:
-    print(off, length)
+from omega_match.omega_match import Compiler, Matcher
+
+# Compile once (creates matcher.olm). You can also stream patterns with Compiler().
+stats = Compiler.compile_from_filename("matcher.olm", "patterns.txt", case_insensitive=True)
+print("Patterns compiled:", stats.stored_pattern_count + stats.short_pattern_count)
+
+# Auto-selects best native variant (prefers PGO when bundled)
+with Matcher("matcher.olm") as matcher:
+  hay = open("haystack.txt", "rb").read()
+  results = matcher.match(hay, word_boundary=True, longest_only=True, no_overlap=True)
+  for r in results:
+    print(r.offset, r.length)
 ```
 
 ## Quick Start (Python CLI)
