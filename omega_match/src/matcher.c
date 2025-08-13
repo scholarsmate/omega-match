@@ -500,6 +500,21 @@ OLM_ALWAYS_INLINE static int cmp_run(size_t a, size_t b, const run_t *restrict r
   return (ra->len > rb->len) ? -1 : 1; // longer first when offsets equal
 }
 
+// Helper function to perform sift-down on a heap
+OLM_ALWAYS_INLINE static void sift_down(size_t *heap, size_t n, size_t start, const run_t *runs) {
+  size_t idx = start;
+  for (;;) {
+    size_t l = 2 * idx + 1, r = l + 1, smallest = idx;
+    if (l < n && cmp_run(heap[l], heap[smallest], runs) < 0) smallest = l;
+    if (r < n && cmp_run(heap[r], heap[smallest], runs) < 0) smallest = r;
+    if (smallest == idx) break;
+    size_t tmp = heap[idx];
+    heap[idx] = heap[smallest];
+    heap[smallest] = tmp;
+    idx = smallest;
+  }
+}
+
 // finalize helper merging thread-local vectors
 static omega_match_results_t *
 finalize_match_results(match_vector_t **restrict thread_matches,
@@ -560,18 +575,7 @@ finalize_match_results(match_vector_t **restrict thread_matches,
   for (ptrdiff_t i = (ptrdiff_t)active / 2 - 1; i >= 0; --i) {
     // Sift-down from i
     size_t start = (size_t)i;
-  // Sift-down loop to maintain heap property
-    size_t n = active, idx = start;
-    for (;;) {
-      size_t l = 2 * idx + 1, r = l + 1, smallest = idx;
-  if (l < n && cmp_run(heap[l], heap[smallest], runs) < 0) smallest = l;
-  if (r < n && cmp_run(heap[r], heap[smallest], runs) < 0) smallest = r;
-      if (smallest == idx) break;
-      size_t tmp = heap[idx];
-      heap[idx] = heap[smallest];
-      heap[smallest] = tmp;
-      idx = smallest;
-    }
+    sift_down(heap, active, start, runs);
   }
 
   // On-merge filtering state
@@ -613,17 +617,7 @@ finalize_match_results(match_vector_t **restrict thread_matches,
     }
     if (active > 0) {
       // Place root properly using sift-down
-      size_t n = active, idx = 0;
-      for (;;) {
-        size_t l = 2 * idx + 1, r = l + 1, smallest = idx;
-  if (l < n && cmp_run(heap[l], heap[smallest], runs) < 0) smallest = l;
-  if (r < n && cmp_run(heap[r], heap[smallest], runs) < 0) smallest = r;
-        if (smallest == idx) break;
-        size_t tmp = heap[idx];
-        heap[idx] = heap[smallest];
-        heap[smallest] = tmp;
-        idx = smallest;
-      }
+      sift_down(heap, active, 0, runs);
     }
   }
 

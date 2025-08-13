@@ -16,27 +16,44 @@
 #if defined(__AVX2__) || defined(_MSC_VER)
   #if defined(_MSC_VER)
     #include <intrin.h>
-    // MSVC: use __cpuid/_xgetbv; intrinsics are always available when including <immintrin.h>
-    static inline int olm_cpu_supports_avx2(void) {
-      static int cached = -1;
-      if (cached != -1) return cached;
-      int cpuInfo[4] = {0};
-      __cpuid(cpuInfo, 0);
-      int maxId = cpuInfo[0];
-      if (maxId < 1) { cached = 0; return cached; }
-      __cpuid(cpuInfo, 1);
-      const int osxsave = (cpuInfo[2] & (1 << 27)) != 0;
-      const int avx = (cpuInfo[2] & (1 << 28)) != 0;
-      if (!(osxsave && avx)) { cached = 0; return cached; }
-      unsigned long long xcr0 = _xgetbv(0);
-      if ((xcr0 & 0x6) != 0x6) { cached = 0; return cached; }
-      if (maxId >= 7) {
-        __cpuidex(cpuInfo, 7, 0);
-        cached = ((cpuInfo[1] & (1 << 5)) != 0);
-        return cached;
-      }
-      cached = 0;
+  #endif
+
+  // Common AVX2 detection logic, parameterized by platform-specific queries
+  static int olm_avx2_supported_impl(
+      void (*cpuid_func)(int[4], int),
+      unsigned long long (*get_xcr0_func)(void),
+      int (*cpuidex_avx2_func)(int[4])
+  ) {
+    static int cached = -1;
+    if (cached != -1) return cached;
+    int cpuInfo[4] = {0};
+    cpuid_func(cpuInfo, 0);
+    int maxId = cpuInfo[0];
+    if (maxId < 1) { cached = 0; return cached; }
+    cpuid_func(cpuInfo, 1);
+    const int osxsave = (cpuInfo[2] & (1 << 27)) != 0;
+    const int avx = (cpuInfo[2] & (1 << 28)) != 0;
+    if (!(osxsave && avx)) { cached = 0; return cached; }
+    unsigned long long xcr0 = get_xcr0_func();
+    if ((xcr0 & 0x6) != 0x6) { cached = 0; return cached; }
+    if (maxId >= 7) {
+      cached = cpuidex_avx2_func(cpuInfo);
       return cached;
+    }
+    cached = 0;
+    return cached;
+  }
+
+  #if defined(_MSC_VER)
+    // MSVC: use __cpuid/_xgetbv; intrinsics are always available when including <immintrin.h>
+    static inline void msvc_cpuid(int cpuInfo[4], int func) { __cpuid(cpuInfo, func); }
+    static inline unsigned long long msvc_get_xcr0(void) { return _xgetbv(0); }
+    static inline int msvc_cpuidex_avx2(int cpuInfo[4]) {
+      __cpuidex(cpuInfo, 7, 0);
+      return ((cpuInfo[1] & (1 << 5)) != 0);
+    }
+    static inline int olm_cpu_supports_avx2(void) {
+      return olm_avx2_supported_impl(msvc_cpuid, msvc_get_xcr0, msvc_cpuidex_avx2);
     }
   #else
     // GCC/Clang: Prefer portable builtins when available (works on Apple Clang as well)
@@ -59,29 +76,25 @@
         return ((unsigned long long)edx << 32) | eax;
       }
       #endif
-      static inline int olm_cpu_supports_avx2(void) {
-        static int cached = -1;
-        if (cached != -1) return cached;
-        unsigned int eax, ebx, ecx, edx;
-        if (!__get_cpuid(0, &eax, &ebx, &ecx, &edx)) { cached = 0; return cached; }
-        unsigned int maxId = eax;
-        if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) { cached = 0; return cached; }
-        const int osxsave = (ecx & (1u << 27)) != 0;
-        const int avx = (ecx & (1u << 28)) != 0;
-        if (!(osxsave && avx)) { cached = 0; return cached; }
-        unsigned long long xcr0 = 0ULL;
+      static inline void gcc_cpuid(int cpuInfo[4], int func) {
+        __get_cpuid((unsigned int)func, (unsigned int*)&cpuInfo[0], (unsigned int*)&cpuInfo[1], 
+                   (unsigned int*)&cpuInfo[2], (unsigned int*)&cpuInfo[3]);
+      }
+      static inline unsigned long long gcc_get_xcr0(void) {
         #if defined(__GNUC__) && !defined(__APPLE__)
-          xcr0 = olm_read_xcr0();
+          return olm_read_xcr0();
+        #else
+          return 0x6ULL; // Assume supported on Apple
         #endif
-        if ((xcr0 & 0x6ULL) != 0x6ULL) { cached = 0; return cached; }
-        if (maxId >= 7) {
-          unsigned int eax7, ebx7, ecx7, edx7;
-          __get_cpuid_count(7, 0, &eax7, &ebx7, &ecx7, &edx7);
-          cached = ((ebx7 & (1u << 5)) != 0);
-          return cached;
-        }
-        cached = 0;
-        return cached;
+      }
+      static inline int gcc_cpuidex_avx2(int cpuInfo[4]) {
+        unsigned int eax7, ebx7, ecx7, edx7;
+        __get_cpuid_count(7, 0, &eax7, &ebx7, &ecx7, &edx7);
+        cpuInfo[1] = (int)ebx7;
+        return ((ebx7 & (1u << 5)) != 0);
+      }
+      static inline int olm_cpu_supports_avx2(void) {
+        return olm_avx2_supported_impl(gcc_cpuid, gcc_get_xcr0, gcc_cpuidex_avx2);
       }
     #endif
   #endif
@@ -330,6 +343,7 @@ int probe_bucket(const uint8_t *restrict control_bytes,
   const uint8_t cand_fp = (uint8_t)((hash_uint32(cand) >> 24) | 1u);
   // Use named constants for scalar byte tricks (see common.h for definitions)
   // BYTE_REPLICATE_64: 0x0101010101010101ULL, replicates a byte across all bytes of a 64-bit word
+  // HIGH_BIT_MASK_64: 0x8080808080808080ULL, mask for high bit of each byte in a 64-bit word
   const uint64_t rep = BYTE_REPLICATE_64 * cand_fp;
     uint32_t probed = 0;
     while (probed < size) {
