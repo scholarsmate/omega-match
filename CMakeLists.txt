@@ -90,8 +90,7 @@ if(ENABLE_PGO_GENERATE)
         # MSVC PGO - Generate phase
         set(PGO_PROFILE_DIR "${CMAKE_BINARY_DIR}/pgo-profiles")
         file(MAKE_DIRECTORY ${PGO_PROFILE_DIR})
-        add_compile_options(/GL)  # Whole program optimization
-        add_link_options(/LTCG /GENPROFILE)  # Link-time code generation + profile generation
+        # Note: PGO flags will be applied per-target to avoid shared library issues
         message(STATUS "MSVC PGO profiles will be written to: ${PGO_PROFILE_DIR}")
     else()
         message(WARNING "PGO instrumentation not supported for compiler: ${CMAKE_C_COMPILER_ID}")
@@ -120,8 +119,7 @@ if(ENABLE_PGO_USE)
     elseif(CMAKE_C_COMPILER_ID STREQUAL "MSVC")
         # MSVC PGO - Use phase
         # Profile data should be available from the generate phase
-        add_compile_options(/GL)  # Whole program optimization
-        add_link_options(/LTCG /USEPROFILE)  # Link-time code generation + profile use
+        # Note: PGO flags will be applied per-target to avoid shared library issues
         message(STATUS "Using MSVC PGO profiles from previous training run")
     else()
         message(WARNING "PGO optimization not supported for compiler: ${CMAKE_C_COMPILER_ID}")
@@ -184,7 +182,22 @@ target_include_directories(omega_match_static
     $<INSTALL_INTERFACE:include>)
 target_compile_features(omega_match_static PUBLIC c_std_17)
 
-# Always build shared library (DLL) for MSVC, even during PGO phases
+# Apply PGO or aggressive optimization to static library
+if (ENABLE_PGO_GENERATE AND CMAKE_C_COMPILER_ID STREQUAL "MSVC")
+    # Use PGO instrumentation for static library
+    target_compile_options(omega_match_static PRIVATE /GL)
+    target_link_options(omega_match_static PRIVATE /LTCG /GENPROFILE)
+elseif (ENABLE_PGO_USE AND CMAKE_C_COMPILER_ID STREQUAL "MSVC")
+    # Use PGO for static library
+    target_compile_options(omega_match_static PRIVATE /GL)
+    target_link_options(omega_match_static PRIVATE /LTCG /USEPROFILE)
+elseif (CMAKE_BUILD_TYPE STREQUAL "Release" AND CMAKE_C_COMPILER_ID STREQUAL "MSVC")
+    # Use aggressive standard optimization for Release builds
+    target_compile_options(omega_match_static PRIVATE /GL)
+    target_link_options(omega_match_static PRIVATE /LTCG)
+endif()
+
+# Always build shared library (DLL) for all configurations
 add_library(omega_match_shared SHARED ${OMEGA_MATCH_SOURCES})
 set_target_properties(omega_match_shared PROPERTIES
     POSITION_INDEPENDENT_CODE ON
@@ -195,18 +208,36 @@ target_include_directories(omega_match_shared
     $<INSTALL_INTERFACE:include>)
 target_compile_features(omega_match_shared PUBLIC c_std_17)
 
-# Export all symbols for Windows DLL
-if (WIN32)
-    # Enable automatic symbol export on Windows
-    set_target_properties(omega_match_shared PROPERTIES
-        WINDOWS_EXPORT_ALL_SYMBOLS TRUE
-        ARCHIVE_OUTPUT_NAME omega_match        # omega_match.lib (import library)
-        RUNTIME_OUTPUT_NAME omega_match        # omega_match.dll
-    )
-endif ()
+# Use aggressive standard optimization for shared library (avoid PGO database issues)
+if (CMAKE_BUILD_TYPE STREQUAL "Release" AND CMAKE_C_COMPILER_ID STREQUAL "MSVC")
+    # Use whole program optimization but not PGO for shared library
+    target_compile_options(omega_match_shared PRIVATE /GL)
+    target_link_options(omega_match_shared PRIVATE /LTCG)
+endif()
 
-# Create the main alias for external use (defaults to shared when available)
-add_library(omega_match ALIAS omega_match_shared)
+    # Export all symbols for Windows DLL
+    if (WIN32)
+        # During PGO builds, disable automatic symbol export and use explicit .def file
+        # to avoid CMake crashes when analyzing PGO-instrumented object files
+        if (ENABLE_PGO_GENERATE OR ENABLE_PGO_USE)
+            set_target_properties(omega_match_shared PROPERTIES
+                ARCHIVE_OUTPUT_NAME omega_match        # omega_match.lib (import library)
+                RUNTIME_OUTPUT_NAME omega_match        # omega_match.dll
+            )
+            # Use explicit .def file for symbol export during PGO builds
+            target_sources(omega_match_shared PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/omega_match_shared.def)
+        else()
+            # Enable automatic symbol export on Windows for non-PGO builds
+            set_target_properties(omega_match_shared PROPERTIES
+                WINDOWS_EXPORT_ALL_SYMBOLS TRUE
+                ARCHIVE_OUTPUT_NAME omega_match        # omega_match.lib (import library)
+                RUNTIME_OUTPUT_NAME omega_match        # omega_match.dll
+            )
+        endif()
+    endif ()
+
+    # Create the main alias for external use (defaults to shared when available)
+    add_library(omega_match ALIAS omega_match_shared)
 
 
 # ---------------------------------------------------------------------------
@@ -308,9 +339,7 @@ endmacro()
 
 # Apply configuration to libraries
 configure_omega_match_target(omega_match_static)
-if(NOT (ENABLE_PGO_GENERATE OR ENABLE_PGO_USE) OR NOT MSVC)
-    configure_omega_match_target(omega_match_shared)
-endif()
+configure_omega_match_target(omega_match_shared)
 
 # ---------------------------------------------------------------------------
 # Optional CLI tool (always uses static library to avoid DLL issues)
@@ -328,9 +357,29 @@ if (OMEGA_MATCH_BUILD_CLI)
             ${CMAKE_CURRENT_SOURCE_DIR}/omega_match/include
     )
 
-    # Always link CLI tool against static library for simplicity and portability
-    target_link_libraries(olm PRIVATE omega_match_static)
+    # Link against shared library during PGO builds to generate profile data for the DLL
+    # Otherwise link against static library for simplicity and portability
+    if ((ENABLE_PGO_GENERATE OR ENABLE_PGO_USE) AND BUILD_SHARED_LIBS)
+        target_link_libraries(olm PRIVATE omega_match_shared)
+    else()
+        target_link_libraries(olm PRIVATE omega_match_static)
+    endif()
     target_compile_features(olm PRIVATE c_std_17)
+
+    # Apply PGO optimization to executable
+    if (ENABLE_PGO_GENERATE AND CMAKE_C_COMPILER_ID STREQUAL "MSVC")
+        # Use PGO instrumentation for executable
+        target_compile_options(olm PRIVATE /GL)
+        target_link_options(olm PRIVATE /LTCG /GENPROFILE)
+    elseif (ENABLE_PGO_USE AND CMAKE_C_COMPILER_ID STREQUAL "MSVC")
+        # Use PGO for executable
+        target_compile_options(olm PRIVATE /GL)
+        target_link_options(olm PRIVATE /LTCG /USEPROFILE)
+    elseif (CMAKE_BUILD_TYPE STREQUAL "Release" AND CMAKE_C_COMPILER_ID STREQUAL "MSVC")
+        # Use aggressive standard optimization for Release builds
+        target_compile_options(olm PRIVATE /GL)
+        target_link_options(olm PRIVATE /LTCG)
+    endif()
 
     # Link OpenMP for CLI tool when available
     if (HAVE_OPENMP)
@@ -438,7 +487,7 @@ install(TARGETS omega_match_static
         LIBRARY DESTINATION lib
         RUNTIME DESTINATION bin)
 
-# Conditionally install shared library (only when not in MSVC PGO phases)
+# Install both static and shared libraries
 install(TARGETS omega_match_shared
     EXPORT omega_matchTargets
     ARCHIVE DESTINATION lib
@@ -514,10 +563,22 @@ endif()
 include(CPack)
 
 # ---------------------------------------------------------------------------
-# Copy shared library to Python bindings with platform-specific name (skip during MSVC PGO phases)
+# Copy shared library to Python bindings with platform-specific name
 # ---------------------------------------------------------------------------
 set(PYBINDINGS_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/bindings/python/omega_match/native/lib")
 file(MAKE_DIRECTORY ${PYBINDINGS_LIB_DIR})
+
+# Determine PGO suffix for library naming
+set(PGO_SUFFIX "")
+if (ENABLE_PGO_USE)
+    if (CMAKE_C_COMPILER_ID STREQUAL "MSVC")
+        set(PGO_SUFFIX "-msvc-pgo")
+    elseif (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+        set(PGO_SUFFIX "-gcc-pgo")
+    elseif (CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        set(PGO_SUFFIX "-clang-pgo")
+    endif()
+endif()
 
 if (WIN32)
     # Only x64 currently provided for Windows
@@ -525,8 +586,8 @@ if (WIN32)
         add_custom_command(TARGET omega_match_shared POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 $<TARGET_FILE:omega_match_shared>
-                "${PYBINDINGS_LIB_DIR}/libomega_match-windows-x64.dll"
-            COMMENT "Copying Windows x64 DLL to Python bindings native/lib directory"
+                "${PYBINDINGS_LIB_DIR}/libomega_match-windows-x64${PGO_SUFFIX}.dll"
+            COMMENT "Copying Windows x64 DLL to Python bindings native/lib directory (PGO suffix: ${PGO_SUFFIX})"
         )
     endif()
 elseif(APPLE)
@@ -534,15 +595,15 @@ elseif(APPLE)
         add_custom_command(TARGET omega_match_shared POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 $<TARGET_FILE:omega_match_shared>
-                "${PYBINDINGS_LIB_DIR}/libomega_match-macos-arm64.dylib"
-            COMMENT "Copying macOS arm64 dylib to Python bindings native/lib directory"
+                "${PYBINDINGS_LIB_DIR}/libomega_match-macos-arm64${PGO_SUFFIX}.dylib"
+            COMMENT "Copying macOS arm64 dylib to Python bindings native/lib directory (PGO suffix: ${PGO_SUFFIX})"
         )
     elseif (CMAKE_OSX_ARCHITECTURES MATCHES "x86_64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
         add_custom_command(TARGET omega_match_shared POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 $<TARGET_FILE:omega_match_shared>
-                "${PYBINDINGS_LIB_DIR}/libomega_match-macos-x64.dylib"
-            COMMENT "Copying macOS x64 dylib to Python bindings native/lib directory"
+                "${PYBINDINGS_LIB_DIR}/libomega_match-macos-x64${PGO_SUFFIX}.dylib"
+            COMMENT "Copying macOS x64 dylib to Python bindings native/lib directory (PGO suffix: ${PGO_SUFFIX})"
         )
     endif()
 elseif(UNIX)
@@ -550,21 +611,21 @@ elseif(UNIX)
         add_custom_command(TARGET omega_match_shared POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 $<TARGET_FILE:omega_match_shared>
-                "${PYBINDINGS_LIB_DIR}/libomega_match-linux-x64.so"
-            COMMENT "Copying Linux x64 .so to Python bindings native/lib directory"
+                "${PYBINDINGS_LIB_DIR}/libomega_match-linux-x64${PGO_SUFFIX}.so"
+            COMMENT "Copying Linux x64 .so to Python bindings native/lib directory (PGO suffix: ${PGO_SUFFIX})"
         )
     elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
         add_custom_command(TARGET omega_match_shared POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 $<TARGET_FILE:omega_match_shared>
-                "${PYBINDINGS_LIB_DIR}/libomega_match-linux-arm64.so"
-            COMMENT "Copying Linux arm64 .so to Python bindings native/lib directory"
+                "${PYBINDINGS_LIB_DIR}/libomega_match-linux-arm64${PGO_SUFFIX}.so"
+            COMMENT "Copying Linux arm64 .so to Python bindings native/lib directory (PGO suffix: ${PGO_SUFFIX})"
         )
     endif()
 endif()
 
 # ---------------------------------------------------------------------------
-# Build Python wheel for bindings (optional target, skip during PGO generation)
+# Build Python wheel for bindings (optional target)
 # ---------------------------------------------------------------------------
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_custom_target(python_wheel
