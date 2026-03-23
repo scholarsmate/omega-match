@@ -1,7 +1,18 @@
 # tests/test_omega_match.py
 
+import os
+import subprocess
+import sys
+import textwrap
+
 import pytest
 
+from olm import (
+    _parse_first_keyed_record,
+    _parse_keyed_record,
+    _parse_uint64_prefix,
+    compile_mode,
+)
 from omega_match.omega_match import (
     Compiler,
     Matcher,
@@ -13,6 +24,14 @@ from omega_match.omega_match import (
 
 def write_file(path, lines):
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def dispatch_results(results, handlers):
+    events = []
+    for result in results:
+        handler = handlers[result.key]
+        handler(result, events)
+    return events
 
 
 def test_get_version():
@@ -323,3 +342,429 @@ def test_line_exact_match(tmp_path):
         assert len(offsets) == 1
         assert matches == [b"exactline"]
         assert offsets[0] == 7  # Position after "before\n"
+
+
+def test_pattern_keys_basic(tmp_path):
+    """Test that patterns compiled with keys return correct keys in results."""
+    output_path = str(tmp_path / "keyed.olm")
+    with Compiler(output_path) as compiler:
+        compiler.add_pattern(b"hello", key=100)
+        compiler.add_pattern(b"world", key=200)
+
+    with Matcher(output_path) as m:
+        results = m.match(b"hello world")
+        assert len(results) == 2
+        assert results[0].match == b"hello"
+        assert results[0].key == 100
+        assert results[1].match == b"world"
+        assert results[1].key == 200
+
+
+def test_pattern_keys_default_zero(tmp_path):
+    """Test that patterns without explicit keys get key=0."""
+    output_path = str(tmp_path / "nokeys.olm")
+    with Compiler(output_path) as compiler:
+        compiler.add_pattern(b"alpha")
+        compiler.add_pattern(b"bravo")
+
+    with Matcher(output_path) as m:
+        results = m.match(b"alpha bravo")
+        assert len(results) == 2
+        for r in results:
+            assert r.key == 0
+
+
+def test_pattern_keys_mixed(tmp_path):
+    """Test mixing keyed and unkeyed patterns (unkeyed get key=0)."""
+    output_path = str(tmp_path / "mixed.olm")
+    with Compiler(output_path) as compiler:
+        compiler.add_pattern(b"apple", key=42)
+        compiler.add_pattern(b"banana")  # key=0
+
+    with Matcher(output_path) as m:
+        results = m.match(b"apple banana")
+        assert len(results) == 2
+        keyed = {r.match: r.key for r in results}
+        assert keyed[b"apple"] == 42
+        assert keyed[b"banana"] == 0
+
+
+def test_pattern_keys_short_patterns(tmp_path):
+    """Test keys with short patterns (1-4 bytes) handled by the short matcher."""
+    output_path = str(tmp_path / "short_keyed.olm")
+    with Compiler(output_path) as compiler:
+        compiler.add_pattern(b"ab", key=10)
+        compiler.add_pattern(b"xyz", key=20)
+        compiler.add_pattern(b"test", key=30)
+
+    with Matcher(output_path) as m:
+        results = m.match(b"ab xyz test")
+        assert len(results) == 3
+        keyed = {r.match: r.key for r in results}
+        assert keyed[b"ab"] == 10
+        assert keyed[b"xyz"] == 20
+        assert keyed[b"test"] == 30
+
+
+def test_pattern_keys_large_values(tmp_path):
+    """Test that large 64-bit key values are preserved correctly."""
+    output_path = str(tmp_path / "large_keys.olm")
+    large_key = (1 << 63) - 1  # Near max uint64
+    with Compiler(output_path) as compiler:
+        compiler.add_pattern(b"target", key=large_key)
+
+    with Matcher(output_path) as m:
+        results = m.match(b"find target here")
+        assert len(results) == 1
+        assert results[0].key == large_key
+
+
+def test_pattern_keys_single_byte(tmp_path):
+    """Test keys with single-byte patterns."""
+    output_path = str(tmp_path / "single_keyed.olm")
+    with Compiler(output_path) as compiler:
+        compiler.add_pattern(b"X", key=99)
+        compiler.add_pattern(b"Y", key=88)
+
+    with Matcher(output_path) as m:
+        results = m.match(b"XaYbX")
+        assert len(results) == 3
+        keys = [r.key for r in results]
+        assert keys == [99, 88, 99]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected_value", "expected_end"),
+    [
+        (b"0", 0, 1),
+        (b"0x0,", 0, 3),
+        (b"0123\t", 83, 4),
+        (b"+7:", 7, 2),
+        (b" \t42,", 42, 4),
+        (b"18446744073709551615,", (1 << 64) - 1, 20),
+    ],
+)
+def test_parse_uint64_prefix_valid_cases(raw, expected_value, expected_end):
+    value, end = _parse_uint64_prefix(raw)
+    assert value == expected_value
+    assert end == expected_end
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"",
+        b" ",
+        b"-1",
+        b"+",
+        b"0x",
+        b"xyz",
+        b"18446744073709551616",
+    ],
+)
+def test_parse_uint64_prefix_rejects_invalid_cases(raw):
+    with pytest.raises(ValueError):
+        _parse_uint64_prefix(raw)
+
+
+def test_parse_first_keyed_record_detects_delimiter():
+    key, delim, pattern = _parse_first_keyed_record(b"0x10\talpha")
+    assert key == 16
+    assert delim == b"\t"
+    assert pattern == b"alpha"
+
+
+def test_parse_keyed_record_rejects_invalid_key_and_missing_delimiter():
+    with pytest.raises(ValueError):
+        _parse_keyed_record(b"12x,alpha", b",")
+    with pytest.raises(LookupError):
+        _parse_keyed_record(b"12 alpha", b",")
+
+
+def test_compiler_add_pattern_rejects_invalid_key_range(tmp_path):
+    output_path = str(tmp_path / "invalid_key.olm")
+    with Compiler(output_path) as compiler:
+        with pytest.raises(ValueError):
+            compiler.add_pattern(b"alpha", key=-1)
+        with pytest.raises(ValueError):
+            compiler.add_pattern(b"alpha", key=1 << 64)
+        with pytest.raises(TypeError):
+            compiler.add_pattern(b"alpha", key="7")  # type: ignore[arg-type]
+
+
+def test_pattern_keys_same_bucket(tmp_path):
+    """Regression: keys must stay in sync when patterns sharing a 4-byte
+    prefix are sorted by length within their hash bucket."""
+    output_path = str(tmp_path / "same_bucket.olm")
+    with Compiler(output_path) as compiler:
+        compiler.add_pattern(b"abcde", key=1)
+        compiler.add_pattern(b"abcdef", key=2)
+
+    with Matcher(output_path) as m:
+        results = m.match(b"xxabcdefyy")
+        keyed = {r.match: r.key for r in results}
+        assert keyed[b"abcde"] == 1
+        assert keyed[b"abcdef"] == 2
+
+
+def test_pattern_keys_same_bucket_mixed_keyed_and_unkeyed(tmp_path):
+    """Regression: lockstep reordering must preserve zero-key entries too."""
+    output_path = str(tmp_path / "same_bucket_mixed.olm")
+    with Compiler(output_path) as compiler:
+        compiler.add_pattern(b"abcdeg", key=11)
+        compiler.add_pattern(b"abcdefg")
+        compiler.add_pattern(b"abcdef", key=22)
+        compiler.add_pattern(b"abcde")
+
+    with Matcher(output_path) as m:
+        results = m.match(b"xxabcdefgyy")
+        keyed = {r.match: r.key for r in results}
+        assert keyed[b"abcde"] == 0
+        assert keyed[b"abcdef"] == 22
+        assert keyed[b"abcdefg"] == 0
+
+
+def test_python_keyed_compile_mode_parses_plus_and_octal(tmp_path):
+    patterns_path = tmp_path / "keyed_patterns.txt"
+    patterns_path.write_bytes(b"+7,xyz\n0123,abc\n")
+    output_path = tmp_path / "cli_keyed.olm"
+
+    compile_mode(
+        str(output_path),
+        str(patterns_path),
+        case_insensitive=False,
+        ignore_punctuation=False,
+        elide_whitespace=False,
+        keyed=True,
+        verbose=False,
+    )
+
+    with Matcher(str(output_path)) as m:
+        results = m.match(b"abc xyz")
+        keyed = {r.match: r.key for r in results}
+        assert keyed[b"xyz"] == 7
+        assert keyed[b"abc"] == 83
+
+
+def test_python_keyed_compile_mode_rejects_invalid_first_record(tmp_path):
+    patterns_path = tmp_path / "bad_keyed_patterns.txt"
+    patterns_path.write_bytes(b"foo\tabc\n7\txyz\n")
+    output_path = tmp_path / "bad_cli_keyed.olm"
+
+    with pytest.raises(SystemExit) as exc:
+        compile_mode(
+            str(output_path),
+            str(patterns_path),
+            case_insensitive=False,
+            ignore_punctuation=False,
+            elide_whitespace=False,
+            keyed=True,
+            verbose=False,
+        )
+
+    assert exc.value.code == 1
+    assert not output_path.exists()
+
+
+def test_python_keyed_compile_mode_reports_actual_first_key_line(tmp_path, capsys):
+    patterns_path = tmp_path / "bad_keyed_patterns_with_blanks.txt"
+    patterns_path.write_bytes(b"\n\nfoo\tabc\n7\txyz\n")
+    output_path = tmp_path / "bad_cli_keyed_line_num.olm"
+
+    with pytest.raises(SystemExit) as exc:
+        compile_mode(
+            str(output_path),
+            str(patterns_path),
+            case_insensitive=False,
+            ignore_punctuation=False,
+            elide_whitespace=False,
+            keyed=True,
+            verbose=False,
+        )
+
+    captured = capsys.readouterr()
+    assert exc.value.code == 1
+    assert "line 3" in captured.err
+    assert not output_path.exists()
+
+
+def test_compile_mode_verbose_empty_file_does_not_divide_by_zero(tmp_path, capsys):
+    patterns_path = tmp_path / "empty_patterns.txt"
+    patterns_path.write_bytes(b"")
+    output_path = tmp_path / "empty.olm"
+
+    compile_mode(
+        str(output_path),
+        str(patterns_path),
+        case_insensitive=False,
+        ignore_punctuation=False,
+        elide_whitespace=False,
+        keyed=False,
+        verbose=True,
+    )
+
+    captured = capsys.readouterr()
+    assert "Ratio: 0.00" in captured.err
+
+
+def test_pattern_reactor_dispatch_order(tmp_path):
+    """Pattern keys should support deterministic callback-table dispatch."""
+    output_path = str(tmp_path / "reactor_order.olm")
+    with Compiler(output_path) as compiler:
+        compiler.add_pattern(b"ERROR", key=1)
+        compiler.add_pattern(b"WARN", key=2)
+        compiler.add_pattern(b"OK", key=3)
+
+    handlers = {
+        1: lambda result, events: events.append(
+            ("error", result.offset, result.match.decode("ascii"))
+        ),
+        2: lambda result, events: events.append(
+            ("warn", result.offset, result.match.decode("ascii"))
+        ),
+        3: lambda result, events: events.append(
+            ("ok", result.offset, result.match.decode("ascii"))
+        ),
+    }
+
+    with Matcher(output_path) as m:
+        results = m.match(b"OK WARN ERROR OK")
+
+    events = dispatch_results(results, handlers)
+    assert events == [
+        ("ok", 0, "OK"),
+        ("warn", 3, "WARN"),
+        ("error", 8, "ERROR"),
+        ("ok", 14, "OK"),
+    ]
+
+
+def test_pattern_reactor_respects_longest_only_and_no_overlap(tmp_path):
+    """Reactor dispatch should receive the same filtered match stream users see."""
+    output_path = str(tmp_path / "reactor_filters.olm")
+    with Compiler(output_path) as compiler:
+        compiler.add_pattern(b"abc", key=1)
+        compiler.add_pattern(b"abcd", key=2)
+
+    handlers = {
+        1: lambda result, events: events.append(("short", result.offset)),
+        2: lambda result, events: events.append(("long", result.offset)),
+    }
+
+    with Matcher(output_path) as m:
+        all_events = dispatch_results(m.match(b"xxabcdyy"), handlers)
+        longest_events = dispatch_results(
+            m.match(b"xxabcdyy", longest_only=True), handlers
+        )
+        no_overlap_events = dispatch_results(
+            m.match(b"xxabcdyy", no_overlap=True), handlers
+        )
+
+    assert all_events == [("long", 2), ("short", 2)]
+    assert longest_events == [("long", 2)]
+    assert no_overlap_events == [("long", 2)]
+
+
+def test_pattern_reactor_large_same_bucket_dispatch(tmp_path):
+    """Shared-prefix keyed dispatch should stay correct across a larger bucket."""
+    output_path = str(tmp_path / "reactor_same_bucket_large.olm")
+    patterns = [
+        (f"same-prefix-{i:02d}".encode("ascii"), i + 1) for i in range(24)
+    ]
+
+    with Compiler(output_path) as compiler:
+        for pattern, key in patterns:
+            compiler.add_pattern(pattern, key=key)
+
+    haystack = b" | ".join(pattern for pattern, _ in patterns)
+    expected = {
+        pattern: (key, haystack.index(pattern)) for pattern, key in patterns
+    }
+
+    handlers = {
+        key: (
+            lambda expected_pattern: (
+                lambda result, events: events.append(
+                    (expected_pattern, result.key, result.offset)
+                )
+            )
+        )(pattern)
+        for pattern, key in patterns
+    }
+
+    with Matcher(output_path) as m:
+        results = m.match(haystack)
+
+    events = dispatch_results(results, handlers)
+    assert len(events) == len(patterns)
+    for pattern, key, offset in events:
+        expected_key, expected_offset = expected[pattern]
+        assert key == expected_key
+        assert offset == expected_offset
+
+
+def test_pattern_keys_same_bucket_capacity_growth_from_unkeyed_to_keyed(tmp_path):
+    """Regression: growing a previously unkeyed bucket must zero legacy slots."""
+    output_path = str(tmp_path / "same_bucket_growth.olm")
+    patterns = [
+        (b"abcd-0000", 0),
+        (b"abcd-0001", 0),
+        (b"abcd-0002", 0),
+        (b"abcd-0003", 0),
+        (b"abcd-0004", 77),
+    ]
+
+    with Compiler(output_path) as compiler:
+        for pattern, key in patterns:
+            compiler.add_pattern(pattern, key=key)
+
+    haystack = b" ".join(pattern for pattern, _ in patterns)
+    expected = {pattern: key for pattern, key in patterns}
+
+    with Matcher(output_path) as m:
+        results = m.match(haystack)
+
+    keyed = {r.match: r.key for r in results}
+    for pattern, key in expected.items():
+        assert keyed[pattern] == key
+
+
+def test_python_binding_shutdown_cleanup_exits_cleanly(tmp_path):
+    output_path = tmp_path / "shutdown_cleanup.olm"
+    script = textwrap.dedent(
+        f"""
+        from omega_match.omega_match import Compiler, Matcher
+
+        output_path = r"{output_path}"
+
+        with Compiler(output_path) as compiler:
+            compiler.add_pattern(b"alpha", key=11)
+            compiler.add_pattern(b"beta")
+
+        closed_matcher = Matcher(output_path)
+        assert [result.key for result in closed_matcher.match(b"alpha beta")] == [11, 0]
+        closed_matcher.destroy()
+
+        leaked_matcher = Matcher(output_path)
+        assert [result.key for result in leaked_matcher.match(b"beta alpha")] == [0, 11]
+        """
+    )
+    env = os.environ.copy()
+    python_root = str(__file__)
+    python_root = os.path.dirname(os.path.dirname(os.path.abspath(python_root)))
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        python_root
+        if not existing_pythonpath
+        else python_root + os.pathsep + existing_pythonpath
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr or completed.stdout

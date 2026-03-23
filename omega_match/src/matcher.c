@@ -81,10 +81,19 @@ struct omega_list_matcher_struct {
   const uint8_t *bucket_data;
   int case_insensitive;
   int ignore_punctuation;
+  int has_keys; // non-zero if compiled with FLAG_HAS_KEYS
   omega_match_stats_t *stats;
   char *temp_path; // non-NULL if compiled on the fly
   transform_table_t *transform_table;
+  const uint8_t *short_matcher_base;
   short_matcher_t short_matcher;
+  // Short matcher key arrays (offsets into short_matcher_base when has_keys)
+  uint32_t sm_keys1_offset;    // 256 packed uint64_t entries for 1-byte patterns
+  const uint32_t *sm_vals2;    // sorted 2-byte values for key lookup
+  uint32_t sm_keys2_offset;    // packed uint64_t array parallel to sm_vals2
+  uint32_t sm_len2_keyed;      // number of 2-byte keyed entries
+  uint32_t sm_keys3_offset;    // packed uint64_t array parallel to arr3
+  uint32_t sm_keys4_offset;    // packed uint64_t array parallel to arr4
 };
 
 // Fast lookup table for word characters
@@ -179,16 +188,43 @@ int omega_list_matcher_emit_header_info(
   return emit_header_info(matcher->header, fp);
 }
 
+static OLM_ALWAYS_INLINE uint32_t load_u32_unaligned(
+    const uint8_t *restrict ptr) {
+  uint32_t value;
+  memcpy(&value, ptr, sizeof(value));
+  return value;
+}
+
+static OLM_ALWAYS_INLINE uint64_t load_u64_unaligned(
+    const uint8_t *restrict ptr) {
+  uint64_t value;
+  memcpy(&value, ptr, sizeof(value));
+  return value;
+}
+
+static OLM_ALWAYS_INLINE int file_span_in_bounds(
+    const uint8_t *restrict base, size_t size, const uint8_t *restrict ptr,
+    size_t span) {
+  if (ptr < base) {
+    return 0;
+  }
+  const size_t offset = (size_t)(ptr - base);
+  return offset <= size && span <= size - offset;
+}
+
 // Scan through the bucket's patterns and append exact matches.
 static uint64_t scan_bucket_and_append(
     const uint8_t *restrict bucket_ptr, const uint8_t *restrict pat_store,
     match_vector_t *restrict local, const uint8_t *restrict haystack,
     const size_t haystack_size, const size_t pos, const int word_boundary,
     const int word_prefix, const int word_suffix, const int line_start,
-    const int line_end, uint64_t *restrict compares) {
+    const int line_end, const int has_keys, uint64_t *restrict compares) {
   uint64_t matches = 0;
   const uint32_t num_patterns = *(const uint32_t *)(bucket_ptr + 4);
   const uint8_t *pattern_ptr = bucket_ptr + 8;
+  // User keys follow the pattern array when has_keys is set
+  const uint8_t *user_keys =
+      has_keys ? (pattern_ptr + num_patterns * sizeof(pattern_t)) : NULL;
   const uint8_t *hay_pos = haystack + pos;
   const size_t remaining = haystack_size - pos;
   
@@ -253,7 +289,11 @@ static uint64_t scan_bucket_and_append(
       continue;
     }
     
-    append_match(local, &(omega_match_result_t){pos, len, haystack + pos});
+    const uint64_t ukey =
+        user_keys ? load_u64_unaligned(user_keys + (j * sizeof(uint64_t))) : 0;
+    append_match(local, &(omega_match_result_t){
+        .offset = pos, .len = len, ._reserved = 0,
+        .match = haystack + pos, .key = ukey});
     ++matches;
   }
   return matches;
@@ -264,6 +304,18 @@ static uint64_t scan_bucket_and_append(
 static int oa_matcher_load(const char *path, omega_list_matcher_t *matcher) {
   size_t size;
   uint8_t *map = omega_matcher_map_filename(path, &size, 0);
+  if (unlikely(!map)) {
+    return -1;
+  }
+#define LOAD_FAIL()                                                            \
+  do {                                                                         \
+    omega_matcher_unmap_file(map, size);                                       \
+    return -1;                                                                 \
+  } while (0)
+
+  if (unlikely(size < sizeof(compiled_header_t))) {
+    LOAD_FAIL();
+  }
 
   // Needed to unmap the file later
   matcher->mapped_file_base = map;
@@ -272,37 +324,56 @@ static int oa_matcher_load(const char *path, omega_list_matcher_t *matcher) {
   // 1. Map the header
   compiled_header_t *hdr = (compiled_header_t *)map;
   if (unlikely(memcmp(hdr->magic, HEADER_MAGIC, HEADER_MAGIC_SIZE) != 0)) {
-    omega_matcher_unmap_file(map, size);
-    return -1;
+    LOAD_FAIL();
+  }
+  if (unlikely(hdr->version > VERSION)) {
+    LOAD_FAIL();
   }
   matcher->header = hdr;
 
   size_t offset = sizeof(compiled_header_t);
 
   // 2. Pattern store
+  if (unlikely(hdr->pattern_store_size > size - offset)) {
+    LOAD_FAIL();
+  }
   matcher->pattern_store = map + offset;
   offset += hdr->pattern_store_size;
 
   // 3. Bloom filter
+  if (unlikely(!file_span_in_bounds(map, size, map + offset,
+                                    BLOOM_HEADER_SIZE + sizeof(uint32_t)))) {
+    LOAD_FAIL();
+  }
   if (unlikely(memcmp(map + offset, BLOOM_HEADER, BLOOM_HEADER_SIZE) != 0)) {
-    omega_matcher_unmap_file(map, size);
-    return -1;
+    LOAD_FAIL();
   }
   offset += BLOOM_HEADER_SIZE;
-  matcher->bf.bit_size = *(uint32_t *)(map + offset);
+  matcher->bf.bit_size = load_u32_unaligned(map + offset);
   offset += sizeof(matcher->bf.bit_size);
+  if (unlikely(hdr->bloom_filter_size > size - offset)) {
+    LOAD_FAIL();
+  }
   matcher->bf.bits = (uint64_t *)(map + offset);
   offset += hdr->bloom_filter_size;
 
   // 4. Hash table
+  if (unlikely(!file_span_in_bounds(map, size, map + offset, HASH_HEADER_SIZE))) {
+    LOAD_FAIL();
+  }
   if (unlikely(memcmp(map + offset, HASH_HEADER, HASH_HEADER_SIZE) != 0)) {
-    omega_matcher_unmap_file(map, size);
-    return -1;
+    LOAD_FAIL();
   }
   offset += HASH_HEADER_SIZE;
 
+  // Set has_keys from header flags
+  matcher->has_keys = (hdr->flags & FLAG_HAS_KEYS) ? 1 : 0;
+
   // For version >= 2, a control-byte array (table_size bytes) precedes index array
   if (hdr->version >= 2) {
+    if (unlikely(hdr->table_size > size - offset)) {
+      LOAD_FAIL();
+    }
     matcher->control_bytes = (const uint8_t *)(map + offset);
     offset += hdr->table_size * sizeof(uint8_t);
   } else {
@@ -310,44 +381,56 @@ static int oa_matcher_load(const char *path, omega_list_matcher_t *matcher) {
   }
 
   // 4a. Index array
+  if (unlikely(hdr->table_size > (size - offset) / sizeof(uint32_t))) {
+    LOAD_FAIL();
+  }
   matcher->index_array = (const uint32_t *)(map + offset);
   offset += hdr->table_size * sizeof(uint32_t);
 
   // 4b. Bucket data
+  if (unlikely(hdr->hash_buckets_size > size - offset)) {
+    LOAD_FAIL();
+  }
   matcher->bucket_data = map + offset;
   offset += hdr->hash_buckets_size;
 
   // 5. Optional short matcher
   if (hdr->short_matcher_size > 0) {
+    if (unlikely(hdr->short_matcher_size > size - offset)) {
+      LOAD_FAIL();
+    }
     const uint8_t *sm_start = map + offset;
+    matcher->short_matcher_base = sm_start;
     if (unlikely(memcmp(sm_start, SHORT_MATCHER_MAGIC,
                         SHORT_MATCHER_MAGIC_SIZE) != 0)) {
       fputs("Short matcher magic mismatch\n", stderr);
-      omega_matcher_unmap_file(map, size);
-      return -1;
+      LOAD_FAIL();
     }
 
     const uint8_t *p = sm_start + SHORT_MATCHER_MAGIC_SIZE; // +8
+    if (unlikely(!file_span_in_bounds(map, size, p, 32 + 8192 + (4 * sizeof(uint32_t))))) {
+      LOAD_FAIL();
+    }
     memcpy(matcher->short_matcher.bitmap1, p, 32);
     p += 32;
     memcpy(matcher->short_matcher.bitmap2, p, 8192);
     p += 8192;
 
-    // Safely read len3 and len4 (validate boundaries)
-    if ((uintptr_t)(p + sizeof(uint32_t) * 2) - (uintptr_t)map > size) {
-      omega_matcher_unmap_file(map, size);
-      return -1;
-    }
-    matcher->short_matcher.len1 = *(const uint32_t *)p;
+    matcher->short_matcher.len1 = load_u32_unaligned(p);
     p += sizeof(uint32_t);
-    matcher->short_matcher.len2 = *(const uint32_t *)p;
+    matcher->short_matcher.len2 = load_u32_unaligned(p);
     p += sizeof(uint32_t);
-    matcher->short_matcher.len3 = *(const uint32_t *)p;
+    matcher->short_matcher.len3 = load_u32_unaligned(p);
     p += sizeof(uint32_t);
-    matcher->short_matcher.len4 = *(const uint32_t *)p;
+    matcher->short_matcher.len4 = load_u32_unaligned(p);
     p += sizeof(uint32_t);
 
     if (matcher->short_matcher.len3 > 0) {
+      if (unlikely(!file_span_in_bounds(map, size, p,
+                                        matcher->short_matcher.len3 *
+                                            sizeof(uint32_t)))) {
+        LOAD_FAIL();
+      }
       matcher->short_matcher.arr3 = (uint32_t *)p;
       p += matcher->short_matcher.len3 * sizeof(uint32_t);
     } else {
@@ -355,22 +438,101 @@ static int oa_matcher_load(const char *path, omega_list_matcher_t *matcher) {
     }
 
     if (matcher->short_matcher.len4 > 0) {
+      if (unlikely(!file_span_in_bounds(map, size, p,
+                                        matcher->short_matcher.len4 *
+                                            sizeof(uint32_t)))) {
+        LOAD_FAIL();
+      }
       matcher->short_matcher.arr4 = (uint32_t *)p;
+      p += matcher->short_matcher.len4 * sizeof(uint32_t);
     } else {
       matcher->short_matcher.arr4 = NULL;
     }
+
+    // Read short matcher key arrays (version >= 3 with FLAG_HAS_KEYS)
+    if (matcher->has_keys) {
+      // 1-byte keys: 256 entries
+      if (unlikely(!file_span_in_bounds(map, size, p, 256 * sizeof(uint64_t)))) {
+        LOAD_FAIL();
+      }
+      matcher->sm_keys1_offset = (uint32_t)(p - sm_start);
+      p += 256 * sizeof(uint64_t);
+      // 2-byte keys: sparse sorted array
+      if (unlikely(!file_span_in_bounds(map, size, p, sizeof(uint32_t)))) {
+        LOAD_FAIL();
+      }
+      matcher->sm_len2_keyed = load_u32_unaligned(p);
+      p += sizeof(uint32_t);
+      if (matcher->sm_len2_keyed > 0) {
+        if (unlikely(!file_span_in_bounds(map, size, p,
+                                          matcher->sm_len2_keyed *
+                                              sizeof(uint32_t)))) {
+          LOAD_FAIL();
+        }
+        matcher->sm_vals2 = (const uint32_t *)p;
+        p += matcher->sm_len2_keyed * sizeof(uint32_t);
+        if (unlikely(!file_span_in_bounds(map, size, p,
+                                          matcher->sm_len2_keyed *
+                                              sizeof(uint64_t)))) {
+          LOAD_FAIL();
+        }
+        matcher->sm_keys2_offset = (uint32_t)(p - sm_start);
+        p += matcher->sm_len2_keyed * sizeof(uint64_t);
+      } else {
+        matcher->sm_vals2 = NULL;
+        matcher->sm_keys2_offset = 0;
+      }
+      // 3-byte keys: parallel to arr3
+      if (matcher->short_matcher.len3 > 0) {
+        if (unlikely(!file_span_in_bounds(map, size, p,
+                                          matcher->short_matcher.len3 *
+                                              sizeof(uint64_t)))) {
+          LOAD_FAIL();
+        }
+        matcher->sm_keys3_offset = (uint32_t)(p - sm_start);
+        p += matcher->short_matcher.len3 * sizeof(uint64_t);
+      } else {
+        matcher->sm_keys3_offset = 0;
+      }
+      // 4-byte keys: parallel to arr4
+      if (matcher->short_matcher.len4 > 0) {
+        if (unlikely(!file_span_in_bounds(map, size, p,
+                                          matcher->short_matcher.len4 *
+                                              sizeof(uint64_t)))) {
+          LOAD_FAIL();
+        }
+        matcher->sm_keys4_offset = (uint32_t)(p - sm_start);
+        p += matcher->short_matcher.len4 * sizeof(uint64_t);
+      } else {
+        matcher->sm_keys4_offset = 0;
+      }
+    } else {
+      matcher->sm_keys1_offset = 0;
+      matcher->sm_vals2 = NULL;
+      matcher->sm_keys2_offset = 0;
+      matcher->sm_len2_keyed = 0;
+      matcher->sm_keys3_offset = 0;
+      matcher->sm_keys4_offset = 0;
+    }
   } else {
+    matcher->short_matcher_base = NULL;
     matcher->short_matcher.len3 = 0;
     matcher->short_matcher.len4 = 0;
     matcher->short_matcher.arr3 = NULL;
     matcher->short_matcher.arr4 = NULL;
+    matcher->sm_keys1_offset = 0;
+    matcher->sm_vals2 = NULL;
+    matcher->sm_keys2_offset = 0;
+    matcher->sm_len2_keyed = 0;
+    matcher->sm_keys3_offset = 0;
+    matcher->sm_keys4_offset = 0;
   }
   if (hdr->short_matcher_size + offset != size) {
     fputs("Short matcher size mismatch\n", stderr);
-    omega_matcher_unmap_file(map, size);
-    return -1;
+    LOAD_FAIL();
   }
 
+#undef LOAD_FAIL
   return 0;
 }
 
@@ -676,6 +838,34 @@ static OLM_ALWAYS_INLINE int binary_search_uint32_optimized(
   return 0;
 }
 
+// Binary search for 2-byte key lookup in sorted sparse array
+static OLM_ALWAYS_INLINE uint64_t
+sm_lookup_key2(const uint32_t *restrict vals, const uint8_t *restrict keys,
+               uint32_t count, uint32_t target) {
+  if (!vals || count == 0) return 0;
+  uint32_t lo = 0, hi = count;
+  while (lo < hi) {
+    const uint32_t mid = lo + ((hi - lo) >> 1);
+    if (vals[mid] == target) {
+      return load_u64_unaligned(keys + (mid * sizeof(uint64_t)));
+    }
+    if (vals[mid] < target) lo = mid + 1; else hi = mid;
+  }
+  return 0;
+}
+
+// Binary search for 3/4-byte key lookup in sorted array (returns index or -1)
+static OLM_ALWAYS_INLINE int
+sm_find_index(const uint32_t *restrict arr, uint32_t count, uint32_t target) {
+  uint32_t lo = 0, hi = count;
+  while (lo < hi) {
+    const uint32_t mid = lo + ((hi - lo) >> 1);
+    if (arr[mid] == target) return (int)mid;
+    if (arr[mid] < target) lo = mid + 1; else hi = mid;
+  }
+  return -1;
+}
+
 // --
 
 // Optimized short matcher queries with better branch prediction
@@ -695,7 +885,8 @@ static OLM_ALWAYS_INLINE int
 short_matcher_query3_fast(const short_matcher_t *restrict sm,
                          const uint8_t *restrict ptr) {
   if (unlikely(sm->len3 == 0)) return 0;
-  const uint32_t key = ((uint32_t)ptr[0] << 16) | ((uint32_t)ptr[1] << 8) | ptr[2];
+  const uint32_t key =
+      ((uint32_t)ptr[0] << 16) | ((uint32_t)ptr[1] << 8) | ptr[2];
   return binary_search_uint32_optimized(sm->arr3, sm->len3, key);
 }
 
@@ -706,6 +897,24 @@ short_matcher_query4_fast(const short_matcher_t *restrict sm,
   const uint32_t key = ((uint32_t)ptr[0] << 24) | ((uint32_t)ptr[1] << 16) |
                        ((uint32_t)ptr[2] << 8) | ptr[3];
   return binary_search_uint32_optimized(sm->arr4, sm->len4, key);
+}
+
+static OLM_ALWAYS_INLINE int
+short_matcher_index3_fast(const short_matcher_t *restrict sm,
+                         const uint8_t *restrict ptr) {
+  if (unlikely(sm->len3 == 0)) return -1;
+  const uint32_t key =
+      ((uint32_t)ptr[0] << 16) | ((uint32_t)ptr[1] << 8) | ptr[2];
+  return sm_find_index(sm->arr3, sm->len3, key);
+}
+
+static OLM_ALWAYS_INLINE int
+short_matcher_index4_fast(const short_matcher_t *restrict sm,
+                         const uint8_t *restrict ptr) {
+  if (unlikely(sm->len4 == 0)) return -1;
+  const uint32_t key = ((uint32_t)ptr[0] << 24) | ((uint32_t)ptr[1] << 16) |
+                       ((uint32_t)ptr[2] << 8) | ptr[3];
+  return sm_find_index(sm->arr4, sm->len4, key);
 }
 
 
@@ -760,6 +969,23 @@ core_match(const omega_list_matcher_t *restrict matcher,
   const bool use_sm2 = sm->len2 > 0;
   const bool use_sm3 = sm->len3 > 0;
   const bool use_sm4 = sm->len4 > 0;
+
+  // Short matcher key lookup data (hoisted for cache locality)
+  const uint8_t *sm_base = matcher->short_matcher_base;
+  const uint8_t *sm_keys1 = matcher->sm_keys1_offset
+                                ? sm_base + matcher->sm_keys1_offset
+                                : NULL;
+  const uint32_t *sm_vals2 = matcher->sm_vals2;
+  const uint8_t *sm_keys2 = matcher->sm_keys2_offset
+                                ? sm_base + matcher->sm_keys2_offset
+                                : NULL;
+  const uint32_t sm_len2_keyed = matcher->sm_len2_keyed;
+  const uint8_t *sm_keys3 = matcher->sm_keys3_offset
+                                ? sm_base + matcher->sm_keys3_offset
+                                : NULL;
+  const uint8_t *sm_keys4 = matcher->sm_keys4_offset
+                                ? sm_base + matcher->sm_keys4_offset
+                                : NULL;
 
   // Optional boundary fast-path: precompute boundary positions and iterate only them
   size_t *boundary_pos = NULL;
@@ -839,7 +1065,8 @@ core_match(const omega_list_matcher_t *restrict matcher,
               scan_bucket_and_append(bucket + slot_offset, pat_st, local,
                                      haystack, (size_t)hsize, pos, word_boundary,
                                      word_prefix, word_suffix, line_start,
-                                     line_end, &total_comparisons);
+                                     line_end, matcher->has_keys,
+                                     &total_comparisons);
             }
           }
         }
@@ -850,26 +1077,36 @@ core_match(const omega_list_matcher_t *restrict matcher,
           const bool line_start_ok = !line_start || is_at_line_start(haystack, pos);
 
           if (use_sm4 && remaining >= 4) {
-            if (short_matcher_query4_fast(sm, h_ptr)) {
-              const bool word_boundary_ok = !word_boundary || !IS_WORD(haystack[pos + 4]);
+            const int idx4 = sm_keys4 ? short_matcher_index4_fast(sm, h_ptr)
+                                      : (short_matcher_query4_fast(sm, h_ptr) ? 0 : -1);
+            if (idx4 >= 0) {
+              const bool word_boundary_ok =
+                  !word_boundary || (pos + 4 >= hsize) ||
+                  !IS_WORD(haystack[pos + 4]);
               const bool word_suffix_ok = !word_suffix || (pos + 4 >= hsize || !IS_WORD(haystack[pos + 4]));
               const bool line_end_ok = !line_end || is_at_line_end(haystack, (size_t)hsize, pos, 4);
               if (word_boundary_ok && word_prefix_ok && word_suffix_ok && line_start_ok && line_end_ok) {
                 ++total_hits;
-                append_match(local, &(omega_match_result_t){ .offset = pos, .len = 4, .match = h_ptr });
+                { const uint64_t k4 = sm_keys4 ? load_u64_unaligned(sm_keys4 + (idx4 * sizeof(uint64_t))) : 0;
+                append_match(local, &(omega_match_result_t){ .offset = pos, .len = 4, ._reserved = 0, .match = h_ptr, .key = k4 }); }
               } else {
                 ++total_misses;
               }
             }
           }
           if (use_sm3 && remaining >= 3) {
-            if (short_matcher_query3_fast(sm, h_ptr)) {
-              const bool word_boundary_ok = !word_boundary || !IS_WORD(haystack[pos + 3]);
+            const int idx3 = sm_keys3 ? short_matcher_index3_fast(sm, h_ptr)
+                                      : (short_matcher_query3_fast(sm, h_ptr) ? 0 : -1);
+            if (idx3 >= 0) {
+              const bool word_boundary_ok =
+                  !word_boundary || (pos + 3 >= hsize) ||
+                  !IS_WORD(haystack[pos + 3]);
               const bool word_suffix_ok = !word_suffix || (pos + 3 >= hsize || !IS_WORD(haystack[pos + 3]));
               const bool line_end_ok = !line_end || is_at_line_end(haystack, (size_t)hsize, pos, 3);
               if (word_boundary_ok && word_prefix_ok && word_suffix_ok && line_start_ok && line_end_ok) {
                 ++total_hits;
-                append_match(local, &(omega_match_result_t){ .offset = pos, .len = 3, .match = h_ptr });
+                { const uint64_t k3 = sm_keys3 ? load_u64_unaligned(sm_keys3 + (idx3 * sizeof(uint64_t))) : 0;
+                append_match(local, &(omega_match_result_t){ .offset = pos, .len = 3, ._reserved = 0, .match = h_ptr, .key = k3 }); }
               } else {
                 ++total_misses;
               }
@@ -877,12 +1114,15 @@ core_match(const omega_list_matcher_t *restrict matcher,
           }
           if (use_sm2 && remaining >= 2) {
             if (short_matcher_query2_fast(sm, h_ptr)) {
-              const bool word_boundary_ok = !word_boundary || !IS_WORD(haystack[pos + 2]);
+              const bool word_boundary_ok =
+                  !word_boundary || (pos + 2 >= hsize) ||
+                  !IS_WORD(haystack[pos + 2]);
               const bool word_suffix_ok = !word_suffix || (pos + 2 >= hsize || !IS_WORD(haystack[pos + 2]));
               const bool line_end_ok = !line_end || is_at_line_end(haystack, (size_t)hsize, pos, 2);
               if (word_boundary_ok && word_prefix_ok && word_suffix_ok && line_start_ok && line_end_ok) {
                 ++total_hits;
-                append_match(local, &(omega_match_result_t){ .offset = pos, .len = 2, .match = h_ptr });
+                { const uint16_t v2 = ((uint16_t)h_ptr[0]<<8)|h_ptr[1]; const uint64_t k2 = sm_keys2 ? sm_lookup_key2(sm_vals2, sm_keys2, sm_len2_keyed, (uint32_t)v2) : 0;
+                append_match(local, &(omega_match_result_t){ .offset = pos, .len = 2, ._reserved = 0, .match = h_ptr, .key = k2 }); }
               } else {
                 ++total_misses;
               }
@@ -895,7 +1135,8 @@ core_match(const omega_list_matcher_t *restrict matcher,
               const bool line_end_ok = !line_end || is_at_line_end(haystack, (size_t)hsize, pos, 1);
               if (word_boundary_ok && word_prefix_ok && word_suffix_ok && line_start_ok && line_end_ok) {
                 ++total_hits;
-                append_match(local, &(omega_match_result_t){ .offset = pos, .len = 1, .match = h_ptr });
+                { const uint64_t k1 = sm_keys1 ? load_u64_unaligned(sm_keys1 + ((size_t)(*h_ptr) * sizeof(uint64_t))) : 0;
+                append_match(local, &(omega_match_result_t){ .offset = pos, .len = 1, ._reserved = 0, .match = h_ptr, .key = k1 }); }
               } else {
                 ++total_misses;
               }
@@ -940,7 +1181,8 @@ core_match(const omega_list_matcher_t *restrict matcher,
             scan_bucket_and_append(bucket + slot_offset, pat_st, local,
                                    haystack, (size_t)hsize, pos, word_boundary,
                                    word_prefix, word_suffix, line_start,
-                                   line_end, &total_comparisons);
+                                   line_end, matcher->has_keys,
+                                   &total_comparisons);
           }
         }
       }
@@ -953,70 +1195,80 @@ core_match(const omega_list_matcher_t *restrict matcher,
         
         // Check length 4 patterns first (most selective) - better cache utilization
         if (use_sm4 && remaining >= 4) {
-          if (short_matcher_query4_fast(sm, h_ptr)) {
-            const bool word_boundary_ok = !word_boundary || !IS_WORD(haystack[pos + 4]);
+          const int idx4 = sm_keys4 ? short_matcher_index4_fast(sm, h_ptr)
+                                    : (short_matcher_query4_fast(sm, h_ptr) ? 0 : -1);
+          if (idx4 >= 0) {
+            const bool word_boundary_ok =
+                !word_boundary || (pos + 4 >= hsize) ||
+                !IS_WORD(haystack[pos + 4]);
             const bool word_suffix_ok = !word_suffix || (pos + 4 >= hsize || !IS_WORD(haystack[pos + 4]));
             const bool line_end_ok = !line_end || is_at_line_end(haystack, (size_t)hsize, pos, 4);
             
             if (word_boundary_ok && word_prefix_ok && word_suffix_ok && 
                       line_start_ok && line_end_ok) {
               ++total_hits;
-              append_match(local, &(omega_match_result_t){
-                                      .offset = pos, .len = 4, .match = h_ptr});
+              { const uint64_t k4 = sm_keys4 ? load_u64_unaligned(sm_keys4 + (idx4 * sizeof(uint64_t))) : 0;
+              append_match(local, &(omega_match_result_t){ .offset = pos, .len = 4, ._reserved = 0, .match = h_ptr, .key = k4 }); }
             } else {
               ++total_misses;
             }
           }
         }
-        
+
         // Check length 3 patterns
         if (use_sm3 && remaining >= 3) {
-          if (short_matcher_query3_fast(sm, h_ptr)) {
-            const bool word_boundary_ok = !word_boundary || !IS_WORD(haystack[pos + 3]);
+          const int idx3 = sm_keys3 ? short_matcher_index3_fast(sm, h_ptr)
+                                    : (short_matcher_query3_fast(sm, h_ptr) ? 0 : -1);
+          if (idx3 >= 0) {
+            const bool word_boundary_ok =
+                !word_boundary || (pos + 3 >= hsize) ||
+                !IS_WORD(haystack[pos + 3]);
             const bool word_suffix_ok = !word_suffix || (pos + 3 >= hsize || !IS_WORD(haystack[pos + 3]));
             const bool line_end_ok = !line_end || is_at_line_end(haystack, (size_t)hsize, pos, 3);
-            
-            if (word_boundary_ok && word_prefix_ok && word_suffix_ok && 
+
+            if (word_boundary_ok && word_prefix_ok && word_suffix_ok &&
                       line_start_ok && line_end_ok) {
               ++total_hits;
-              append_match(local, &(omega_match_result_t){
-                                      .offset = pos, .len = 3, .match = h_ptr});
+              { const uint64_t k3 = sm_keys3 ? load_u64_unaligned(sm_keys3 + (idx3 * sizeof(uint64_t))) : 0;
+              append_match(local, &(omega_match_result_t){ .offset = pos, .len = 3, ._reserved = 0, .match = h_ptr, .key = k3 }); }
             } else {
               ++total_misses;
             }
           }
         }
-        
+
         // Check length 2 patterns (bitmap check is fast)
         if (use_sm2 && remaining >= 2) {
           if (short_matcher_query2_fast(sm, h_ptr)) {
-            const bool word_boundary_ok = !word_boundary || !IS_WORD(haystack[pos + 2]);
+            const bool word_boundary_ok =
+                !word_boundary || (pos + 2 >= hsize) ||
+                !IS_WORD(haystack[pos + 2]);
             const bool word_suffix_ok = !word_suffix || (pos + 2 >= hsize || !IS_WORD(haystack[pos + 2]));
             const bool line_end_ok = !line_end || is_at_line_end(haystack, (size_t)hsize, pos, 2);
-            
-            if (word_boundary_ok && word_prefix_ok && word_suffix_ok && 
+
+            if (word_boundary_ok && word_prefix_ok && word_suffix_ok &&
                       line_start_ok && line_end_ok) {
               ++total_hits;
-              append_match(local, &(omega_match_result_t){
-                                      .offset = pos, .len = 2, .match = h_ptr});
+              { const uint16_t v2 = ((uint16_t)h_ptr[0]<<8)|h_ptr[1]; const uint64_t k2 = sm_keys2 ? sm_lookup_key2(sm_vals2, sm_keys2, sm_len2_keyed, (uint32_t)v2) : 0;
+              append_match(local, &(omega_match_result_t){ .offset = pos, .len = 2, ._reserved = 0, .match = h_ptr, .key = k2 }); }
             } else {
               ++total_misses;
             }
           }
         }
-        
+
         // Check length 1 patterns (bitmap check is fastest)
         if (use_sm1) {
           if (short_matcher_query1_fast(sm, *h_ptr)) {
             const bool word_boundary_ok = !word_boundary || (pos + 1 >= hsize || !IS_WORD(haystack[pos + 1]));
             const bool word_suffix_ok = !word_suffix || (pos + 1 >= hsize || !IS_WORD(haystack[pos + 1]));
             const bool line_end_ok = !line_end || is_at_line_end(haystack, (size_t)hsize, pos, 1);
-            
-            if (word_boundary_ok && word_prefix_ok && word_suffix_ok && 
+
+            if (word_boundary_ok && word_prefix_ok && word_suffix_ok &&
                       line_start_ok && line_end_ok) {
               ++total_hits;
-              append_match(local, &(omega_match_result_t){
-                                      .offset = pos, .len = 1, .match = h_ptr});
+              { const uint64_t k1 = sm_keys1 ? load_u64_unaligned(sm_keys1 + ((size_t)(*h_ptr) * sizeof(uint64_t))) : 0;
+              append_match(local, &(omega_match_result_t){ .offset = pos, .len = 1, ._reserved = 0, .match = h_ptr, .key = k1 }); }
             } else {
               ++total_misses;
             }

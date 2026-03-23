@@ -24,6 +24,14 @@ typedef struct {
   uint32_t cap3;
   uint32_t cap4;
   dedup_set_t *dedup_set;
+  // Key arrays for short patterns (parallel storage, NULL when not using keys)
+  uint64_t keys1[256];   // key for each 1-byte pattern (indexed by byte value)
+  uint64_t *keys3;       // parallel to arr3
+  uint64_t *keys4;       // parallel to arr4
+  uint32_t *vals2;       // sorted 2-byte values (for key lookup)
+  uint64_t *keys2;       // parallel to vals2
+  uint32_t len2_keyed;   // number of 2-byte keyed entries
+  uint32_t cap2_keyed;   // capacity of vals2/keys2 arrays
 } short_matcher_builder_t;
 
 struct omega_list_matcher_compiler_struct {
@@ -35,6 +43,7 @@ struct omega_list_matcher_compiler_struct {
   transform_table_t *transform_table;
   FILE *compiled_fp;
   pattern_store_t *store;
+  int has_keys; // Set to 1 when any pattern has a user-defined key
 };
 
 OLM_ALWAYS_INLINE static int compare_patterns(const void *restrict a,
@@ -52,6 +61,18 @@ OLM_ALWAYS_INLINE static int compare_patterns(const void *restrict a,
   return 0;
 }
 
+// Paired uint32 + uint64 for parallel sorting of short matcher arrays with keys
+typedef struct {
+  uint64_t key;
+  uint32_t val;
+} val_key_pair_t;
+
+// Paired pattern_t + uint64 for sorting bucket patterns with keys in sync
+typedef struct {
+  pattern_t pat;
+  uint64_t key;
+} pattern_key_pair_t;
+
 OLM_ALWAYS_INLINE static int compare_uint32(const void *restrict a,
                                             const void *restrict b) {
   const uint32_t v1 = *(const uint32_t *)a;
@@ -59,20 +80,80 @@ OLM_ALWAYS_INLINE static int compare_uint32(const void *restrict a,
   return (v1 > v2) - (v1 < v2);
 }
 
+OLM_ALWAYS_INLINE static int compare_pattern_key_pair(const void *restrict a,
+                                                       const void *restrict b) {
+  const pattern_key_pair_t *p1 = (const pattern_key_pair_t *)a;
+  const pattern_key_pair_t *p2 = (const pattern_key_pair_t *)b;
+  // Primary: length descending (same as compare_patterns)
+  if (p1->pat.len != p2->pat.len) {
+    return (p2->pat.len > p1->pat.len) - (p2->pat.len < p1->pat.len);
+  }
+  // Tie-breaker: offset ascending
+  if (p1->pat.offset != p2->pat.offset) {
+    return (p1->pat.offset > p2->pat.offset) - (p1->pat.offset < p2->pat.offset);
+  }
+  return 0;
+}
+
+OLM_ALWAYS_INLINE static int compare_val_key_pair(const void *restrict a,
+                                                   const void *restrict b) {
+  const val_key_pair_t *p1 = (const val_key_pair_t *)a;
+  const val_key_pair_t *p2 = (const val_key_pair_t *)b;
+  return (p1->val > p2->val) - (p1->val < p2->val);
+}
+
+// This is the only place bucket order should be changed. patterns[] and
+// user_keys[] form a logical pair: any reorder must happen in lockstep.
+static inline void
+sort_hash_entry_patterns(hash_entry_t *restrict entry) {
+  if (entry->count <= 1) {
+    return;
+  }
+  if (entry->user_keys) {
+    const uint32_t cnt = entry->count;
+    pattern_key_pair_t *pairs = malloc(cnt * sizeof(pattern_key_pair_t));
+    if (unlikely(!pairs)) {
+      ABORT("malloc pattern_key_pairs");
+    }
+    for (uint32_t i = 0; i < cnt; ++i) {
+      pairs[i].pat = entry->patterns[i];
+      pairs[i].key = entry->user_keys[i];
+    }
+    qsort(pairs, cnt, sizeof(pattern_key_pair_t), compare_pattern_key_pair);
+    for (uint32_t i = 0; i < cnt; ++i) {
+      entry->patterns[i] = pairs[i].pat;
+      entry->user_keys[i] = pairs[i].key;
+    }
+    free(pairs);
+    return;
+  }
+  qsort(entry->patterns, entry->count, sizeof(pattern_t), compare_patterns);
+}
+
 static inline void
 short_matcher_init(omega_list_matcher_compiler_t *restrict compiler) {
   short_matcher_builder_t *smb = &compiler->smb;
   smb->sm.arr3 = calloc(INITIAL_SHORT_CAPACITY, sizeof(uint32_t));
   smb->sm.arr4 = calloc(INITIAL_SHORT_CAPACITY, sizeof(uint32_t));
+  smb->keys3 = calloc(INITIAL_SHORT_CAPACITY, sizeof(uint64_t));
+  smb->keys4 = calloc(INITIAL_SHORT_CAPACITY, sizeof(uint64_t));
   smb->dedup_set = dedup_set_create();
-  if (unlikely(!smb->sm.arr3 || !smb->sm.arr4 || !smb->dedup_set)) {
+  if (unlikely(!smb->sm.arr3 || !smb->sm.arr4 || !smb->keys3 || !smb->keys4 ||
+               !smb->dedup_set)) {
     free(smb->sm.arr3);
     free(smb->sm.arr4);
+    free(smb->keys3);
+    free(smb->keys4);
     dedup_set_destroy(smb->dedup_set);
     ABORT("init short_matcher_builder");
   }
   smb->sm.len3 = smb->sm.len4 = 0;
   smb->cap3 = smb->cap4 = INITIAL_SHORT_CAPACITY;
+  memset(smb->keys1, 0, sizeof(smb->keys1));
+  smb->vals2 = NULL;
+  smb->keys2 = NULL;
+  smb->len2_keyed = 0;
+  smb->cap2_keyed = 0;
 }
 
 static inline void
@@ -81,10 +162,15 @@ short_matcher_free(const omega_list_matcher_compiler_t *restrict compiler) {
   dedup_set_destroy(smb->dedup_set);
   free(smb->sm.arr3);
   free(smb->sm.arr4);
+  free(smb->keys3);
+  free(smb->keys4);
+  free(smb->vals2);
+  free(smb->keys2);
 }
 
 static int short_matcher_add(omega_list_matcher_compiler_t *restrict compiler,
-                             const uint8_t *restrict buf, const uint32_t len) {
+                             const uint8_t *restrict buf, const uint32_t len,
+                             const uint64_t user_key) {
   short_matcher_builder_t *smb = &compiler->smb;
 
   // Check for duplicates
@@ -96,38 +182,91 @@ static int short_matcher_add(omega_list_matcher_compiler_t *restrict compiler,
   switch (len) {
   case 1: {
     smb->sm.bitmap1[buf[0] >> 3] |= (1 << (buf[0] & 7));
+    smb->keys1[buf[0]] = user_key;
     ++smb->sm.len1;
     break;
   }
   case 2: {
     const uint16_t v = ((uint16_t)buf[0] << 8) | buf[1];
     smb->sm.bitmap2[v >> 3] |= (1 << (v & 7));
+    // Store key in sparse array for 2-byte patterns
+    if (smb->len2_keyed == smb->cap2_keyed) {
+      const uint32_t newCap =
+          smb->cap2_keyed ? (smb->cap2_keyed << 1) : INITIAL_SHORT_CAPACITY;
+      uint32_t *new_vals2 = malloc(newCap * sizeof(uint32_t));
+      uint64_t *new_keys2 = malloc(newCap * sizeof(uint64_t));
+      if (unlikely(!new_vals2 || !new_keys2)) {
+        free(new_vals2);
+        free(new_keys2);
+        return -1;
+      }
+      if (smb->len2_keyed > 0) {
+        memcpy(new_vals2, smb->vals2, smb->len2_keyed * sizeof(uint32_t));
+        memcpy(new_keys2, smb->keys2, smb->len2_keyed * sizeof(uint64_t));
+      }
+      free(smb->vals2);
+      free(smb->keys2);
+      smb->vals2 = new_vals2;
+      smb->keys2 = new_keys2;
+      smb->cap2_keyed = newCap;
+    }
+    smb->vals2[smb->len2_keyed] = (uint32_t)v;
+    smb->keys2[smb->len2_keyed] = user_key;
+    ++smb->len2_keyed;
     ++smb->sm.len2;
     break;
   }
   case 3: {
     if (smb->sm.len3 == smb->cap3) {
-      smb->cap3 <<= 1;
-      smb->sm.arr3 = realloc(smb->sm.arr3, smb->cap3 * sizeof(uint32_t));
-      if (unlikely(!smb->sm.arr3)) {
+      const uint32_t new_cap3 = smb->cap3 << 1;
+      uint32_t *new_arr3 = malloc(new_cap3 * sizeof(uint32_t));
+      uint64_t *new_keys3 = malloc(new_cap3 * sizeof(uint64_t));
+      if (unlikely(!new_arr3 || !new_keys3)) {
+        free(new_arr3);
+        free(new_keys3);
         return -1;
       }
+      if (smb->sm.len3 > 0) {
+        memcpy(new_arr3, smb->sm.arr3, smb->sm.len3 * sizeof(uint32_t));
+        memcpy(new_keys3, smb->keys3, smb->sm.len3 * sizeof(uint64_t));
+      }
+      free(smb->sm.arr3);
+      free(smb->keys3);
+      smb->sm.arr3 = new_arr3;
+      smb->keys3 = new_keys3;
+      smb->cap3 = new_cap3;
     }
-    smb->sm.arr3[smb->sm.len3++] =
+    smb->sm.arr3[smb->sm.len3] =
         ((uint32_t)buf[0] << 16) | (buf[1] << 8) | buf[2];
+    smb->keys3[smb->sm.len3] = user_key;
+    ++smb->sm.len3;
     break;
   }
   case 4: {
     if (smb->sm.len4 == smb->cap4) {
-      smb->cap4 <<= 1;
-      smb->sm.arr4 = realloc(smb->sm.arr4, smb->cap4 * sizeof(uint32_t));
-      if (unlikely(!smb->sm.arr4)) {
+      const uint32_t new_cap4 = smb->cap4 << 1;
+      uint32_t *new_arr4 = malloc(new_cap4 * sizeof(uint32_t));
+      uint64_t *new_keys4 = malloc(new_cap4 * sizeof(uint64_t));
+      if (unlikely(!new_arr4 || !new_keys4)) {
+        free(new_arr4);
+        free(new_keys4);
         return -1;
       }
+      if (smb->sm.len4 > 0) {
+        memcpy(new_arr4, smb->sm.arr4, smb->sm.len4 * sizeof(uint32_t));
+        memcpy(new_keys4, smb->keys4, smb->sm.len4 * sizeof(uint64_t));
+      }
+      free(smb->sm.arr4);
+      free(smb->keys4);
+      smb->sm.arr4 = new_arr4;
+      smb->keys4 = new_keys4;
+      smb->cap4 = new_cap4;
     }
-    smb->sm.arr4[smb->sm.len4++] = ((uint32_t)buf[0] << 24) |
-                                   ((uint32_t)buf[1] << 16) |
-                                   ((uint32_t)buf[2] << 8) | buf[3];
+    smb->sm.arr4[smb->sm.len4] = ((uint32_t)buf[0] << 24) |
+                                  ((uint32_t)buf[1] << 16) |
+                                  ((uint32_t)buf[2] << 8) | buf[3];
+    smb->keys4[smb->sm.len4] = user_key;
+    ++smb->sm.len4;
     break;
   }
   default:
@@ -205,15 +344,24 @@ omega_list_matcher_compiler_t *omega_list_matcher_compiler_create(
 int omega_list_matcher_compiler_add_pattern(
     omega_list_matcher_compiler_t *restrict compiler,
     const uint8_t *restrict pattern, uint32_t len) {
+  return omega_list_matcher_compiler_add_pattern_with_key(compiler, pattern, len, 0);
+}
+
+int omega_list_matcher_compiler_add_pattern_with_key(
+    omega_list_matcher_compiler_t *restrict compiler,
+    const uint8_t *restrict pattern, uint32_t len, uint64_t user_key) {
   if (unlikely(len == 0 || !pattern)) {
-    ABORT("omega_list_matcher_compiler_add_pattern: invalid arguments");
+    ABORT("omega_list_matcher_compiler_add_pattern_with_key: invalid arguments");
+  }
+  if (user_key != 0) {
+    compiler->has_keys = 1;
   }
   if (compiler->transform_table) {
     pattern =
         transform_apply(compiler->transform_table, pattern, len, &len, NULL);
   }
   if (len <= 4) {
-    if (unlikely(short_matcher_add(compiler, pattern, len) != 0)) {
+    if (unlikely(short_matcher_add(compiler, pattern, len, user_key) != 0)) {
       ABORT("short_matcher_add");
     }
     if (len < compiler->stats.smallest_pattern_length) {
@@ -226,12 +374,10 @@ int omega_list_matcher_compiler_add_pattern(
   } else {
     const uint64_t offset = store_pattern(compiler->store, pattern, len);
     if (unlikely(offset == UINT64_MAX)) {
-      // fprintf(stderr, "WARNING: Duplicate pattern found: %.*s\n", len,
-      // pattern);
       return 0;
     }
     const uint32_t key = pack_gram(pattern);
-    hash_table_insert(&compiler->table, key, offset, len);
+    hash_table_insert(&compiler->table, key, offset, len, user_key);
   }
   return 0;
 }
@@ -276,9 +422,7 @@ int omega_list_matcher_compiler_destroy(
       if (compiler->table.entries[i].count > max_bucket) {
         max_bucket = compiler->table.entries[i].count;
       }
-      qsort(compiler->table.entries[i].patterns,
-            compiler->table.entries[i].count, sizeof(pattern_t),
-            compare_patterns);
+      sort_hash_entry_patterns(&compiler->table.entries[i]);
     }
   }
 
@@ -344,6 +488,20 @@ int omega_list_matcher_compiler_destroy(
            compiler->compiled_fp);
     fwrite(compiler->table.entries[i].patterns, sizeof(pattern_t),
            compiler->table.entries[i].count, compiler->compiled_fp);
+    // Write user keys for this bucket (only when FLAG_HAS_KEYS is set)
+    if (compiler->has_keys) {
+      const uint32_t cnt = compiler->table.entries[i].count;
+      if (compiler->table.entries[i].user_keys) {
+        fwrite(compiler->table.entries[i].user_keys, sizeof(uint64_t), cnt,
+               compiler->compiled_fp);
+      } else {
+        // Write zeros for entries without explicit keys
+        for (uint32_t j = 0; j < cnt; ++j) {
+          const uint64_t zero = 0;
+          fwrite(&zero, sizeof(uint64_t), 1, compiler->compiled_fp);
+        }
+      }
+    }
   }
 
   // Record the size of the hash buckets in the header
@@ -365,10 +523,59 @@ int omega_list_matcher_compiler_destroy(
   // Write the short matcher if it has any patterns
   if (compiler->smb.sm.len4 > 0 || compiler->smb.sm.len3 > 0 ||
       compiler->smb.sm.len2 > 0 || compiler->smb.sm.len1 > 0) {
-    qsort(compiler->smb.sm.arr3, compiler->smb.sm.len3, sizeof(uint32_t),
-          compare_uint32);
-    qsort(compiler->smb.sm.arr4, compiler->smb.sm.len4, sizeof(uint32_t),
-          compare_uint32);
+    // Sort 3-byte and 4-byte arrays with keys in parallel
+    if (compiler->has_keys) {
+      // Sort arr3 + keys3 together
+      if (compiler->smb.sm.len3 > 0) {
+        val_key_pair_t *pairs3 = malloc(compiler->smb.sm.len3 * sizeof(val_key_pair_t));
+        if (unlikely(!pairs3)) { ABORT("malloc pairs3"); }
+        for (uint32_t i = 0; i < compiler->smb.sm.len3; ++i) {
+          pairs3[i].val = compiler->smb.sm.arr3[i];
+          pairs3[i].key = compiler->smb.keys3[i];
+        }
+        qsort(pairs3, compiler->smb.sm.len3, sizeof(val_key_pair_t), compare_val_key_pair);
+        for (uint32_t i = 0; i < compiler->smb.sm.len3; ++i) {
+          compiler->smb.sm.arr3[i] = pairs3[i].val;
+          compiler->smb.keys3[i] = pairs3[i].key;
+        }
+        free(pairs3);
+      }
+      // Sort arr4 + keys4 together
+      if (compiler->smb.sm.len4 > 0) {
+        val_key_pair_t *pairs4 = malloc(compiler->smb.sm.len4 * sizeof(val_key_pair_t));
+        if (unlikely(!pairs4)) { ABORT("malloc pairs4"); }
+        for (uint32_t i = 0; i < compiler->smb.sm.len4; ++i) {
+          pairs4[i].val = compiler->smb.sm.arr4[i];
+          pairs4[i].key = compiler->smb.keys4[i];
+        }
+        qsort(pairs4, compiler->smb.sm.len4, sizeof(val_key_pair_t), compare_val_key_pair);
+        for (uint32_t i = 0; i < compiler->smb.sm.len4; ++i) {
+          compiler->smb.sm.arr4[i] = pairs4[i].val;
+          compiler->smb.keys4[i] = pairs4[i].key;
+        }
+        free(pairs4);
+      }
+      // Sort vals2 + keys2 together
+      if (compiler->smb.len2_keyed > 0) {
+        val_key_pair_t *pairs2 = malloc(compiler->smb.len2_keyed * sizeof(val_key_pair_t));
+        if (unlikely(!pairs2)) { ABORT("malloc pairs2"); }
+        for (uint32_t i = 0; i < compiler->smb.len2_keyed; ++i) {
+          pairs2[i].val = compiler->smb.vals2[i];
+          pairs2[i].key = compiler->smb.keys2[i];
+        }
+        qsort(pairs2, compiler->smb.len2_keyed, sizeof(val_key_pair_t), compare_val_key_pair);
+        for (uint32_t i = 0; i < compiler->smb.len2_keyed; ++i) {
+          compiler->smb.vals2[i] = pairs2[i].val;
+          compiler->smb.keys2[i] = pairs2[i].key;
+        }
+        free(pairs2);
+      }
+    } else {
+      qsort(compiler->smb.sm.arr3, compiler->smb.sm.len3, sizeof(uint32_t),
+            compare_uint32);
+      qsort(compiler->smb.sm.arr4, compiler->smb.sm.len4, sizeof(uint32_t),
+            compare_uint32);
+    }
 
     fseek(compiler->compiled_fp, 0, SEEK_END);
     const long int sm_start = ftell(compiler->compiled_fp);
@@ -384,6 +591,27 @@ int omega_list_matcher_compiler_destroy(
            compiler->compiled_fp);
     fwrite(compiler->smb.sm.arr4, sizeof(uint32_t), compiler->smb.sm.len4,
            compiler->compiled_fp);
+
+    // Write key arrays for short matcher (only when FLAG_HAS_KEYS is set)
+    if (compiler->has_keys) {
+      // 1-byte keys: 256 entries indexed by byte value
+      fwrite(compiler->smb.keys1, sizeof(uint64_t), 256, compiler->compiled_fp);
+      // 2-byte keys: sparse sorted array
+      fwrite(&compiler->smb.len2_keyed, sizeof(uint32_t), 1, compiler->compiled_fp);
+      if (compiler->smb.len2_keyed > 0) {
+        fwrite(compiler->smb.vals2, sizeof(uint32_t), compiler->smb.len2_keyed,
+               compiler->compiled_fp);
+        fwrite(compiler->smb.keys2, sizeof(uint64_t), compiler->smb.len2_keyed,
+               compiler->compiled_fp);
+      }
+      // 3-byte keys: parallel to arr3
+      fwrite(compiler->smb.keys3, sizeof(uint64_t), compiler->smb.sm.len3,
+             compiler->compiled_fp);
+      // 4-byte keys: parallel to arr4
+      fwrite(compiler->smb.keys4, sizeof(uint64_t), compiler->smb.sm.len4,
+             compiler->compiled_fp);
+    }
+
     header.short_matcher_size =
         (uint32_t)(ftell(compiler->compiled_fp) - sm_start);
   }
@@ -392,6 +620,9 @@ int omega_list_matcher_compiler_destroy(
   memcpy(header.magic, HEADER_MAGIC, HEADER_MAGIC_SIZE);
   header.version = VERSION;
   header.flags = compiler->compiler_flags;
+  if (compiler->has_keys) {
+    header.flags |= FLAG_HAS_KEYS;
+  }
   header.stored_pattern_count = compiler->stats.stored_pattern_count;
   header.smallest_pattern_length = compiler->stats.smallest_pattern_length;
   header.largest_pattern_length = compiler->stats.largest_pattern_length;

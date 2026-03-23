@@ -636,7 +636,7 @@ endif()
 # ---------------------------------------------------------------------------
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_custom_target(python_wheel
-        COMMAND ${Python3_EXECUTABLE} -m build --wheel
+        COMMAND ${Python3_EXECUTABLE} -m pip wheel --no-deps --wheel-dir dist .
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bindings/python
         COMMENT "Building Python wheel for omega_match Python bindings"
     )
@@ -644,14 +644,14 @@ endif()
 
 add_custom_target(python_binding_tests
     COMMAND ${Python3_EXECUTABLE} -m pip install -e .
-    COMMAND ${Python3_EXECUTABLE} -m pytest tests
+    COMMAND ${Python3_EXECUTABLE} -m pytest -o addopts= tests
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bindings/python
     COMMENT "Running Python pytest suite for omega_match"
 )
-add_dependencies(python_binding_tests python_wheel)
+add_dependencies(python_binding_tests omega_match_shared)
 
 add_test(NAME python_pytest
-    COMMAND ${Python3_EXECUTABLE} -m pytest tests
+    COMMAND ${Python3_EXECUTABLE} -m pytest -o addopts= tests
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bindings/python
 )
 

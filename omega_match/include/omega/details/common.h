@@ -16,12 +16,13 @@
 // --- Magic and version ---
 #define HEADER_MAGIC "0MGM4tCH"
 #define HEADER_MAGIC_SIZE (8)
-#define VERSION (2)
+#define VERSION (3)
 
 // --- Flags for compiled file header (32-bits) ---
 #define FLAG_IGNORE_CASE (1 << 1)
 #define FLAG_IGNORE_PUNCTUATION (1 << 2)
 #define FLAG_ELIDE_WHITESPACE (1 << 3)
+#define FLAG_HAS_KEYS (1 << 4)
 
 // Define the bloom filter header constant
 #define BLOOM_HEADER "0MG8L0oM"
@@ -154,23 +155,31 @@ _Static_assert(sizeof(pattern_t) == 16, "Pattern must be 8-byte aligned");
 #ifdef _MSC_VER
 #pragma pack(push, 1)
 typedef struct {
-  uint32_t key;        // Packed 32-bit gram key
-  uint32_t dist;       // Probe distance for robin‑hood
-  uint32_t count;      // Number of patterns (0 means empty)
-  uint32_t capacity;   // Allocated capacity of the pattern array
-  pattern_t *patterns; // Dynamic array of patterns for this key
+  uint32_t key;          // Packed 32-bit gram key
+  uint32_t dist;         // Probe distance for robin‑hood
+  uint32_t count;        // Number of patterns (0 means empty)
+  uint32_t capacity;     // Allocated capacity of the pattern array
+  pattern_t *patterns;   // Dynamic array of patterns for this key
+  // Parallel to patterns[] by index. Any reordering of patterns[] must reorder
+  // user_keys[] in lockstep or returned match keys will be corrupted.
+  uint64_t *user_keys;   // NULL when no pattern in the bucket has a non-zero key
 } hash_entry_t;
 #pragma pack(pop)
 #else
 typedef struct __attribute__((packed)) {
-  uint32_t key;        // Packed 32-bit gram key
-  uint32_t dist;       // Probe distance for robin‑hood
-  uint32_t count;      // Number of patterns (0 means empty)
-  uint32_t capacity;   // Allocated capacity of the pattern array
-  pattern_t *patterns; // Dynamic array of patterns for this key
+  uint32_t key;          // Packed 32-bit gram key
+  uint32_t dist;         // Probe distance for robin‑hood
+  uint32_t count;        // Number of patterns (0 means empty)
+  uint32_t capacity;     // Allocated capacity of the pattern array
+  pattern_t *patterns;   // Dynamic array of patterns for this key
+  // Parallel to patterns[] by index. Any reordering of patterns[] must reorder
+  // user_keys[] in lockstep or returned match keys will be corrupted.
+  uint64_t *user_keys;   // NULL when no pattern in the bucket has a non-zero key
 } hash_entry_t;
 #endif
-_Static_assert(sizeof(hash_entry_t) == 24, "Hash entry must be 8-byte aligned");
+_Static_assert(sizeof(hash_entry_t) ==
+                   (16 + (2 * sizeof(void *))),
+               "Hash entry must match pointer-width-aware layout");
 
 // --- Hash table structure ---
 #ifdef _MSC_VER

@@ -146,6 +146,8 @@ void hash_table_free(const hash_table_t *restrict ctable) {
     if (table->entries[i].count > 0) {
       free(table->entries[i].patterns);
       table->entries[i].patterns = NULL;
+      free(table->entries[i].user_keys);
+      table->entries[i].user_keys = NULL;
       table->entries[i].count = 0;
       table->entries[i].capacity = 0;
     }
@@ -411,7 +413,8 @@ int probe_bucket(const uint8_t *restrict control_bytes,
 
 // Insert a key-pattern pair into the hash table
 void hash_table_insert(hash_table_t *restrict table, const uint32_t key,
-                       const uint64_t offset, const uint32_t len) {
+                       const uint64_t offset, const uint32_t len,
+                       const uint64_t user_key) {
   if ((float)(table->used + 1) / (float)table->size > LOAD_FACTOR) {
     hash_table_resize(table);
   }
@@ -460,10 +463,35 @@ void hash_table_insert(hash_table_t *restrict table, const uint32_t key,
       memset(tmp + entry->capacity, 0,
              (newCap - entry->capacity) * sizeof(pattern_t));
       entry->patterns = tmp;
+      if (entry->user_keys || user_key) {
+        uint64_t *ktmp;
+        if (entry->user_keys) {
+          ktmp = realloc(entry->user_keys, newCap * sizeof(uint64_t));
+        } else {
+          ktmp = calloc(newCap, sizeof(uint64_t));
+        }
+        if (!ktmp) {
+          ABORT("realloc user_keys array");
+        }
+        if (entry->user_keys) {
+          memset(ktmp + entry->capacity, 0,
+                 (newCap - entry->capacity) * sizeof(uint64_t));
+        }
+        entry->user_keys = ktmp;
+      }
       entry->capacity = newCap;
     }
     entry->patterns[entry->count].offset = offset;
     entry->patterns[entry->count].len = len;
+    if (user_key) {
+      if (!entry->user_keys) {
+        entry->user_keys = calloc(entry->capacity, sizeof(uint64_t));
+        if (!entry->user_keys) {
+          ABORT("calloc user_keys array");
+        }
+      }
+      entry->user_keys[entry->count] = user_key;
+    }
     ++entry->count;
     return;
   }
@@ -486,6 +514,15 @@ void hash_table_insert(hash_table_t *restrict table, const uint32_t key,
   }
   new_entry.patterns[0].offset = offset;
   new_entry.patterns[0].len = len;
+  if (user_key) {
+    new_entry.user_keys = calloc(new_entry.capacity, sizeof(uint64_t));
+    if (!new_entry.user_keys) {
+      ABORT("calloc new entry user_keys array");
+    }
+    new_entry.user_keys[0] = user_key;
+  } else {
+    new_entry.user_keys = NULL;
+  }
   new_entry.dist = probe_distance(base, insert_pos, mask);
 
   // If insert at empty_pos, just place and return

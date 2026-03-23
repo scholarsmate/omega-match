@@ -899,6 +899,67 @@ OmegaMatch uses a two-tier matching pipeline:
 - **Transform table** (when enabled) for case-insensitive, punctuation-ignoring, and whitespace-eliding transformations.
 - **Compiled pattern store** is serialized into a compact binary format and memory-mapped by each matcher, enabling low startup cost, minimal per-instance memory overhead, and parallel sharing across threads or processes.
 
+## Comparison with Other Multi-String Matchers
+
+### Feature Comparison
+
+| Feature | OmegaMatch | Aho-Corasick | Hyperscan | Wu-Manber | Commentz-Walter |
+| ------- | ---------- | ------------ | --------- | --------- | --------------- |
+| Multi-pattern matching | Yes | Yes | Yes | Yes | Yes |
+| Regex support | No (literals only) | No | Yes | No | No |
+| SIMD acceleration | AVX2/SSE2/NEON | Varies by impl | AVX2/AVX-512 | No | No |
+| Multi-threaded | Yes (OpenMP) | No (typically) | Yes | No | No |
+| Compiled pattern store | Yes (memory-mapped) | In-memory only | Serializable | In-memory only | In-memory only |
+| Case-insensitive | Built-in | Wrapper needed | Built-in | Wrapper needed | Wrapper needed |
+| Word boundary filters | Built-in | Post-processing | Partial | Post-processing | Post-processing |
+| Line anchor filters | Built-in | Post-processing | Yes | Post-processing | Post-processing |
+| Longest-only / no-overlap | Built-in (linear time) | Post-processing | Partial | Post-processing | Post-processing |
+| Streaming results | Yes (k-way merge) | Yes (automaton) | Yes | No | No |
+| Short pattern optimization | Yes (bitmap + binary search) | No (uniform trie) | Yes | Poor (short shifts) | Poor (short shifts) |
+| Memory overhead per pattern | Low (hash table) | High (trie nodes + failure links) | Moderate | Moderate (shift tables) | Moderate (shift tables) |
+| Profile-Guided Optimization | Yes (GCC/Clang/MSVC) | No (typically) | No | No | No |
+| Language bindings | C, Python | Many | C, C++, Python | Few | Few |
+
+### Algorithmic Approach
+
+| Algorithm | Core Technique | Strengths | Weaknesses |
+| --------- | ------------- | --------- | ---------- |
+| **OmegaMatch** | Bloom filter + hash table with SIMD control-byte probing | Cache-friendly, low memory per pattern, rich built-in filters, parallelized | Literals only, no substring skipping |
+| **Aho-Corasick** | Trie + failure function (finite automaton) | Guaranteed linear time, theoretical elegance, single-pass | Pointer-chasing (cache-unfriendly), high memory for large alphabets |
+| **Hyperscan** | Hybrid (DFAs, NFA, SIMD literal matchers) | Fastest for regex workloads, Intel-optimized | Intel-only (x86), complex, large binary, no ARM |
+| **Wu-Manber** | Bad-character shift tables | Good skip distance for longer patterns | Degrades with short patterns or large pattern sets |
+| **Commentz-Walter** | Boyer-Moore extended to multi-pattern | Skip-based scanning | Complex failure handling, poor on short patterns |
+| **Rabin-Karp** | Rolling hash | Simple, good for few patterns | Single-pattern focus, hash collision overhead at scale |
+
+### Performance Profile
+
+OmegaMatch's hash-based design avoids the pointer-chasing inherent in trie-based matchers (Aho-Corasick) and the shift-table limitations that affect Wu-Manber on short patterns or large pattern sets. On benchmarks against `grep -F` (which typically uses Aho-Corasick internally):
+
+- **Line-anchored + case-insensitive**: up to **507x faster** than grep
+- **Word-boundary matching**: **56--115x faster** than grep
+- **Raw throughput**: 7--20 GB/s on modern hardware (release builds with PGO)
+- **Baseline literal matching**: competitive with grep (~0.87--1.13x), with OmegaMatch's advantage growing as filters are combined
+
+OmegaMatch is strongest when multiple structural filters (word boundaries, line anchors, longest-only, no-overlap) are applied simultaneously -- these are evaluated during the streaming merge at near-zero marginal cost, whereas other tools must apply them as separate post-processing passes.
+
+### What Is Distinctive About OmegaMatch
+
+OmegaMatch does not introduce a new algorithm in the academic sense. Its individual components -- Bloom filters, Robin Hood hashing, SIMD-accelerated probing, k-way merging -- are established techniques. What is distinctive is **how they are combined into an end-to-end system**:
+
+1. **Hash-based multi-pattern matching instead of automata.** Most multi-pattern matchers descend from Aho-Corasick (trie + failure links). OmegaMatch replaces the automaton with a Bloom filter feeding a SIMD-probed hash table. This trades the automaton's guaranteed single-pass property for better cache locality and lower memory overhead -- a practical win on modern hardware where cache misses dominate.
+
+2. **Two-tier pattern specialization.** Patterns of length 1--4 use dedicated bitmap lookups (O(1) for 1--2 bytes) and binary search (O(log n) for 3--4 bytes), completely bypassing the Bloom filter and hash table. This avoids the performance cliff that shift-table algorithms (Wu-Manber) hit on short patterns and the per-node overhead that tries (Aho-Corasick) pay regardless of pattern length.
+
+3. **Compile-once, memory-map, match-many architecture.** The compiled pattern store is a flat binary file that can be memory-mapped and shared across processes with zero deserialization cost. This is uncommon among multi-pattern matchers, which typically require in-process construction of their data structures.
+
+4. **Streaming merge with integrated filtering.** Per-thread results are merged via a min-heap ordered by (offset ascending, length descending). Longest-only and no-overlap filters are evaluated *during* the merge in a single linear pass, rather than as a separate post-processing step. This guarantees O(n log t) total merge cost (where t = thread count) with no intermediate materialization.
+
+5. **Rich structural filter vocabulary at the engine level.** Word boundaries, word prefixes/suffixes, line-start/line-end anchors, case folding, punctuation removal, and whitespace elision are all first-class options in the matching engine rather than bolted-on post-filters. This allows the engine to short-circuit early (e.g., skipping non-boundary positions entirely) rather than generating matches and discarding them.
+
+In short, OmegaMatch is a **systems-level contribution** rather than an algorithmic one: a carefully optimized pipeline of known techniques arranged to exploit modern hardware (SIMD, multi-core, memory-mapped I/O) for the specific problem of high-throughput exact multi-pattern matching with structural constraints. None of these components would be new to a college algorithms class -- Bloom filters, hash tables, binary search, min-heaps are all textbook. But the classics were designed in an era where memory was flat and CPUs did one thing at a time. OmegaMatch wins by respecting how modern hardware *actually* works: cache lines, SIMD lanes, multiple cores, and memory-mapped I/O. Aho-Corasick's trie is elegant on paper but brutal on a cache hierarchy -- every node traversal is a potential cache miss. Replacing that with a Bloom filter and SIMD-probed hash table turns pointer-chasing into sequential memory access, and that is where the 50--500x margins come from.
+
+> **Good systems engineering beating good algorithms is an underappreciated pattern in practice.**
+
 ## Compiler Options
 
 Supported compilers: GCC, Clang, MSVC (via CMake).
