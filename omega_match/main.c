@@ -1,5 +1,7 @@
 // main.c
 
+#include <errno.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +30,31 @@
 #define OUTPUT_BUFFER_SIZE (256 * 1024)
 
 typedef enum { MODE_UNDEFINED = 0, MODE_COMPILE, MODE_MATCH } omg_app_mode_t;
+
+static int parse_uint64_key(const char *text, char **endptr, uint64_t *out) {
+  char *end = NULL;
+  unsigned long long value;
+
+  if (!text || *text == '-') {
+    if (endptr) {
+      *endptr = (char *)text;
+    }
+    return -1;
+  }
+
+  errno = 0;
+  value = strtoull(text, &end, 0);
+  if (endptr) {
+    *endptr = end;
+  }
+  if (end == text || errno == ERANGE) {
+    return -1;
+  }
+  if (out) {
+    *out = (uint64_t)value;
+  }
+  return 0;
+}
 
 // Flush helper: writes to console or raw file
 #ifdef _WIN32
@@ -87,7 +114,8 @@ static void print_match_stats(const omega_match_stats_t *stats,
 
 // Print match results to given file descriptor or console
 static void print_results_buffered_fd(const omega_match_results_t *results,
-                                      const int fd, const int use_console_api) {
+                                      const int fd, const int use_console_api,
+                                      const int show_keys) {
   char *output_buffer = calloc(1, OUTPUT_BUFFER_SIZE);
   if (unlikely(!output_buffer)) {
     ABORT("calloc output_buffer");
@@ -95,11 +123,21 @@ static void print_results_buffered_fd(const omega_match_results_t *results,
 
   size_t pos = 0;
   for (size_t i = 0; i < results->count; ++i) {
-    int n = snprintf(output_buffer + pos, OUTPUT_BUFFER_SIZE - pos,
-                     "%zu:%.*s\n",
-                     results->matches[i].offset,
-                     results->matches[i].len,
-                     (const char *)results->matches[i].match);
+    int n;
+    if (show_keys) {
+      n = snprintf(output_buffer + pos, OUTPUT_BUFFER_SIZE - pos,
+                   "%zu:%" PRIu64 ":%.*s\n",
+                   results->matches[i].offset,
+                   results->matches[i].key,
+                   results->matches[i].len,
+                   (const char *)results->matches[i].match);
+    } else {
+      n = snprintf(output_buffer + pos, OUTPUT_BUFFER_SIZE - pos,
+                   "%zu:%.*s\n",
+                   results->matches[i].offset,
+                   results->matches[i].len,
+                   (const char *)results->matches[i].match);
+    }
     if (n < 0) continue;
     pos += (size_t)n;
 
@@ -155,6 +193,7 @@ static void compile_usage(const char *prog) {
   fprintf(stderr, "  --ignore-case         Ignore case in patterns\n");
   fprintf(stderr, "  --ignore-punctuation  Ignore punctuation in patterns\n");
   fprintf(stderr, "  --elide-whitespace    Remove whitespace in patterns\n");
+  fprintf(stderr, "  --keyed               Read KEY<delim>PATTERN lines (delimiter auto-detected)\n");
   fprintf(stderr, "  -v, --verbose         Enable verbose output\n");
   fprintf(stderr, "  -h, --help            Show this help message\n");
   fprintf(stderr, "\n");
@@ -185,6 +224,7 @@ static void match_usage(const char *prog) {
   fprintf(stderr, "  --threads N           Number of threads to use\n");
   fprintf(stderr,
           "  --chunk-size N        Chunk size for parallel processing\n");
+  fprintf(stderr, "  --show-keys           Include pattern keys in output\n");
   fprintf(stderr, "  -v, --verbose         Enable verbose output\n");
   fprintf(stderr, "  -h, --help            Show this help message\n");
   fprintf(stderr, "\n");
@@ -282,7 +322,7 @@ int main(const int argc, char *argv[]) {
   int ignore_case = 0, ignore_punctuation = 0, elide_whitespace = 0,
       longest_only = 0, no_overlap = 0, word_boundary = 0, word_prefix = 0,
   word_suffix = 0, line_start = 0, line_end = 0, threads = 0,
-  chunk_size = 0, output_to_file = 0, quiet = 0;
+  chunk_size = 0, output_to_file = 0, quiet = 0, keyed = 0, show_keys = 0;
   const char *output_path = NULL;
 
   const struct option long_opts[] = {
@@ -299,6 +339,8 @@ int main(const int argc, char *argv[]) {
       {"line-start", no_argument, &line_start, 1},
       {"line-end", no_argument, &line_end, 1},
       {"verbose", no_argument, &verbose, 1},
+      {"keyed", no_argument, &keyed, 1},
+      {"show-keys", no_argument, &show_keys, 1},
       {"output", required_argument, NULL, 'o'},
       {"threads", required_argument, NULL, 't'},
       {"chunk-size", required_argument, NULL, 'C'},
@@ -391,9 +433,97 @@ int main(const int argc, char *argv[]) {
   switch (mode_flag) {
   case MODE_COMPILE: {
     omega_match_pattern_store_stats_t pattern_store_stats = {0};
-    omega_list_matcher_compile_patterns_filename(
-        arg1, arg2, ignore_case, ignore_punctuation, elide_whitespace,
-        &pattern_store_stats);
+    if (keyed) {
+      // Keyed compile: read KEY<TAB>PATTERN lines using streaming compiler
+      omega_list_matcher_compiler_t *compiler =
+          omega_list_matcher_compiler_create(arg1, ignore_case,
+                                             ignore_punctuation,
+                                             elide_whitespace);
+      if (!compiler) {
+        fprintf(stderr, "Error: Failed to create compiler for '%s'.\n", arg1);
+        free(new_argv);
+        return EXIT_FAILURE;
+      }
+      FILE *pat_fp = fopen(arg2, "rb");
+      if (!pat_fp) {
+        fprintf(stderr, "Error: Failed to open patterns file '%s'.\n", arg2);
+        omega_list_matcher_compiler_destroy(compiler);
+        remove(arg1);
+        free(new_argv);
+        return EXIT_FAILURE;
+      }
+      char line_buf[65536];
+      size_t line_num = 0;
+      char delim = 0; // auto-detected from first record
+      while (fgets(line_buf, (int)sizeof(line_buf), pat_fp)) {
+        ++line_num;
+        // Strip trailing newline/carriage return
+        size_t line_len = strlen(line_buf);
+        while (line_len > 0 &&
+               (line_buf[line_len - 1] == '\n' ||
+                line_buf[line_len - 1] == '\r')) {
+          line_buf[--line_len] = '\0';
+        }
+        if (line_len == 0) continue; // skip empty lines
+        // Auto-detect delimiter from first record: parse the key and
+        // use the character immediately after it as the delimiter.
+        if (delim == 0) {
+          char *endptr = NULL;
+          uint64_t ignored_key = 0;
+          if (parse_uint64_key(line_buf, &endptr, &ignored_key) != 0 ||
+              endptr >= line_buf + line_len ||
+              *endptr == '\0') {
+            fprintf(stderr,
+                    "Error: cannot detect delimiter from line 1.\n");
+            fclose(pat_fp);
+            omega_list_matcher_compiler_destroy(compiler);
+            remove(arg1);
+            free(new_argv);
+            return EXIT_FAILURE;
+          }
+          delim = *endptr;
+          if (verbose) {
+            fprintf(stderr, "Auto-detected delimiter: '%c' (0x%02x)\n",
+                    delim, (unsigned char)delim);
+          }
+        }
+        // Split on the detected delimiter
+        char *sep = memchr(line_buf, delim, line_len);
+        if (!sep) {
+          fprintf(stderr,
+                  "Warning: line %zu has no '%c' delimiter, skipping.\n",
+                  line_num, delim);
+          continue;
+        }
+        *sep = '\0';
+        char *endptr = NULL;
+        uint64_t key = 0;
+        if (parse_uint64_key(line_buf, &endptr, &key) != 0 ||
+            *endptr != '\0') {
+          fprintf(stderr,
+                  "Warning: line %zu has invalid key '%s', skipping.\n",
+                  line_num, line_buf);
+          continue;
+        }
+        const uint8_t *pattern = (const uint8_t *)(sep + 1);
+        const uint32_t pat_len =
+            (uint32_t)(line_len - (sep - line_buf) - 1);
+        if (pat_len == 0) continue;
+        omega_list_matcher_compiler_add_pattern_with_key(compiler, pattern,
+                                                          pat_len, key);
+      }
+      fclose(pat_fp);
+      const omega_match_pattern_store_stats_t *stats =
+          omega_list_matcher_compiler_get_pattern_store_stats(compiler);
+      if (stats) {
+        pattern_store_stats = *stats;
+      }
+      omega_list_matcher_compiler_destroy(compiler);
+    } else {
+      omega_list_matcher_compile_patterns_filename(
+          arg1, arg2, ignore_case, ignore_punctuation, elide_whitespace,
+          &pattern_store_stats);
+    }
     if (verbose) {
       print_pattern_store_stats(&pattern_store_stats, stderr);
       fputs("Compile completed successfully.\n", stderr);
@@ -461,7 +591,7 @@ int main(const int argc, char *argv[]) {
     }
     // Print the results
     if (!quiet) {
-      print_results_buffered_fd(results, out_fd, use_console_api);
+      print_results_buffered_fd(results, out_fd, use_console_api, show_keys);
     }
     // Free the results
     omega_match_results_destroy(results);

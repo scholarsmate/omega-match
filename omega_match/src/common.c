@@ -27,13 +27,15 @@ int emit_header_info(const compiled_header_t *restrict header,
   fprintf(fp,
           "Header v%d stats: total_patterns=%s, smallest_pattern_length=%s, "
           "largest_pattern_length=%s,"
-          " case_insensitive_support=%s, string_store_size=%s, "
+          " case_insensitive_support=%s, has_keys=%s,"
+          " string_store_size=%s, "
           "bloom_filter_size=%s, num_occupied_buckets=%s,"
           " table_size=%s, min_bucket_size=%s, max_bucket_size=%s, "
           "load_factor=%.2f,"
           " avg_bucket_size=%.2f\n",
           header->version, buf_patterns, buf_smallest, buf_largest,
-          (header->flags & FLAG_IGNORE_CASE) ? "yes" : "no", buf_store,
+          (header->flags & FLAG_IGNORE_CASE) ? "yes" : "no",
+          (header->flags & FLAG_HAS_KEYS) ? "yes" : "no", buf_store,
           buf_bloom, buf_occupied, buf_table, buf_minbkt, buf_maxbkt,
           header->load_factor, header->avg_bucket_size);
   return 0;

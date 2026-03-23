@@ -1,10 +1,12 @@
 # omega_match.py
 
 import atexit
+import ctypes
 import os
 import platform
 import sys
 import threading
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Literal, Optional, Protocol, Tuple, Dict
@@ -23,7 +25,9 @@ typedef struct omega_list_matcher_struct omega_list_matcher_t;
 typedef struct {
   size_t offset;        // Byte offset in haystack
   uint32_t len;         // Length of the match
+  uint32_t _reserved;   // Padding for alignment
   const uint8_t *match; // Pointer to matched bytes in haystack
+  uint64_t key;         // User-defined key (0 if not compiled with keys)
 } omega_match_result_t;
 
 // Collection of match results
@@ -75,6 +79,18 @@ omega_list_matcher_compiler_create(const char *restrict compiled_file,
 int omega_list_matcher_compiler_add_pattern(
     omega_list_matcher_compiler_t *restrict compiler,
     const uint8_t *restrict pattern, uint32_t len);
+
+/**
+ * Add a single pattern with an associated user-defined key.
+ * @param compiler Compiler handle.
+ * @param pattern Pointer to pattern bytes.
+ * @param len Length in bytes of the pattern.
+ * @param key User-defined 64-bit key associated with this pattern.
+ * @return 0 on success, -1 on error.
+ */
+int omega_list_matcher_compiler_add_pattern_with_key(
+    omega_list_matcher_compiler_t *restrict compiler,
+    const uint8_t *restrict pattern, uint32_t len, uint64_t key);
 
 /**
  * Get pattern store statistics from the compiler.
@@ -287,6 +303,9 @@ const char *omega_match_version(void);
 
 # C library FFI handle
 C = None
+_pinned_native_libraries: Dict[str, object] = {}
+_dll_directory_handles: Dict[str, object] = {}
+UINT64_MAX = (1 << 64) - 1
 
 # Global variable to store library information for get_library_info()
 _library_info: Optional[Dict[str, str]] = None
@@ -316,6 +335,7 @@ class MatchStats:
 class MatchResult:
     offset: int
     match: bytes
+    key: int = 0
 
     @property
     def length(self) -> int:
@@ -409,6 +429,7 @@ def _find_best_library_variant(lib_dir_path: Path) -> Tuple[Path, str, str]:
 def _load_library():
     override = os.getenv("OMEGA_MATCH_LIB_PATH")
     if override:
+        override = os.path.abspath(override)
         # Store library info for override path
         global _library_info
         _library_info = {
@@ -417,6 +438,7 @@ def _load_library():
             "optimization": "Unknown",
             "platform": f"{sys.platform}-{platform.machine().lower()}",
         }
+        _pin_native_library(override)
         return ffi.dlopen(override)
 
     lib_dir_path = Path(os.path.dirname(__file__)) / "native" / "lib"
@@ -432,12 +454,25 @@ def _load_library():
         "platform": f"{sys.platform}-{platform.machine().lower()}",
     }
 
-    # Platform-specific loading
-    system, _arch = _detect_platform()
-    if system in {"win32", "cygwin"}:
-        os.add_dll_directory(os.path.dirname(lib_dir_path))
-
+    _pin_native_library(str(lib_path))
     return ffi.dlopen(str(lib_path))
+
+
+def _pin_native_library(lib_path: str) -> None:
+    if sys.platform in {"win32", "cygwin"}:
+        lib_dir = os.path.dirname(lib_path)
+        if lib_dir and lib_dir not in _dll_directory_handles:
+            _dll_directory_handles[lib_dir] = os.add_dll_directory(lib_dir)
+
+    if lib_path in _pinned_native_libraries:
+        return
+
+    # Keep an explicit ctypes handle alive for the lifetime of the process so
+    # the cffi handle is not the final owner during interpreter shutdown.
+    if sys.platform in {"win32", "cygwin"}:
+        _pinned_native_libraries[lib_path] = ctypes.WinDLL(lib_path)
+    else:
+        _pinned_native_libraries[lib_path] = ctypes.CDLL(lib_path)
 
 
 def _get_library():
@@ -529,18 +564,36 @@ class Compiler:
         self.destroy()
 
     def __del__(self):
-        self.destroy()
+        if globals().get("_is_shutting_down") or globals().get("ffi") is None:
+            return
+        try:
+            self.destroy()
+        except Exception:
+            pass
 
-    def add_pattern(self, pattern: bytes) -> None:
+    def add_pattern(self, pattern: bytes, key: int = 0) -> None:
         if not isinstance(pattern, (bytes, bytearray)):
             raise TypeError("Pattern must be bytes")
-        if (
-            self._lib.omega_list_matcher_compiler_add_pattern(
-                self._compiler, pattern, len(pattern)
-            )
-            != 0
-        ):
-            raise ValueError("Failed to add pattern")
+        if not isinstance(key, int):
+            raise TypeError("key must be an integer")
+        if key < 0 or key > UINT64_MAX:
+            raise ValueError("key must be between 0 and 2^64 - 1")
+        if key != 0:
+            if (
+                self._lib.omega_list_matcher_compiler_add_pattern_with_key(
+                    self._compiler, pattern, len(pattern), key
+                )
+                != 0
+            ):
+                raise ValueError("Failed to add pattern with key")
+        else:
+            if (
+                self._lib.omega_list_matcher_compiler_add_pattern(
+                    self._compiler, pattern, len(pattern)
+                )
+                != 0
+            ):
+                raise ValueError("Failed to add pattern")
 
     def get_stats(self) -> PatternStoreStats:
         stats_ptr = self._lib.omega_list_matcher_compiler_get_pattern_store_stats(
@@ -553,9 +606,15 @@ class Compiler:
         )
 
     def destroy(self) -> None:
-        if hasattr(self, "_compiler") and self._compiler and C is not None:
-            self._lib.omega_list_matcher_compiler_destroy(self._compiler)
-            self._compiler = ffi.NULL
+        module_ffi = globals().get("ffi")
+        compiler = getattr(self, "_compiler", None)
+        lib = getattr(self, "_lib", None)
+        if module_ffi is None or lib is None or compiler in (None, module_ffi.NULL):
+            _live_compilers.discard(self)
+            return
+        lib.omega_list_matcher_compiler_destroy(compiler)
+        self._compiler = module_ffi.NULL
+        _live_compilers.discard(self)
 
     @staticmethod
     def compile_from_filename(
@@ -652,7 +711,12 @@ class Matcher:
         self.destroy()
 
     def __del__(self):
-        self.destroy()
+        if globals().get("_is_shutting_down") or globals().get("ffi") is None:
+            return
+        try:
+            self.destroy()
+        except Exception:
+            pass
 
     def match(
         self,
@@ -688,7 +752,8 @@ class Matcher:
         for i in range(res.count):
             m = res.matches[i]
             out.append(
-                MatchResult(offset=m.offset, match=bytes(ffi.buffer(m.match, m.len)))
+                MatchResult(offset=m.offset, match=bytes(ffi.buffer(m.match, m.len)),
+                            key=int(m.key))
             )
         lib.omega_match_results_destroy(res)
         return out
@@ -719,13 +784,20 @@ class Matcher:
         return _get_library().omega_matcher_get_chunk_size(self._matcher)
 
     def destroy(self) -> None:
-        if hasattr(self, "_matcher") and self._matcher and hasattr(self, "_lib"):
-            self._lib.omega_list_matcher_destroy(self._matcher)
-            self._matcher = ffi.NULL
+        module_ffi = globals().get("ffi")
+        matcher = getattr(self, "_matcher", None)
+        lib = getattr(self, "_lib", None)
+        if module_ffi is None or lib is None or matcher in (None, module_ffi.NULL):
+            _live_matchers.discard(self)
+            return
+        lib.omega_list_matcher_destroy(matcher)
+        self._matcher = module_ffi.NULL
+        _live_matchers.discard(self)
 
 
 _destroyed_objects: set[int] = set()
 _destroy_lock = threading.Lock()
+_is_shutting_down = False
 
 
 class Destroyable(Protocol):
@@ -734,33 +806,41 @@ class Destroyable(Protocol):
 
 def _safe_destroy(obj: Destroyable, name: str):
     with _destroy_lock:
-        if id(obj) in _destroyed_objects:
+        obj_id = id(obj)
+        if obj_id in _destroyed_objects:
             return
-        try:
-            obj.destroy()
-        except Exception as e:
-            print(f"Exception in {name}.destroy(): {e}", file=sys.stderr)
-        _destroyed_objects.add(id(obj))
+        _destroyed_objects.add(obj_id)
+    try:
+        obj.destroy()
+    except Exception as e:
+        stderr = getattr(sys, "stderr", None)
+        if stderr is not None:
+            print(f"Exception in {name}.destroy(): {e}", file=stderr)
 
 
-# Register atexit cleanup for all live Compiler/Matcher objects
-_live_compilers: List["Compiler"] = []
-_live_matchers: List["Matcher"] = []
+# Register atexit cleanup for all live Compiler/Matcher objects without
+# keeping them alive solely for shutdown bookkeeping.
+_live_compilers = weakref.WeakSet()
+_live_matchers = weakref.WeakSet()
 
 
 def register_compiler(c: "Compiler") -> None:
-    _live_compilers.append(c)
+    _live_compilers.add(c)
 
 
 def register_matcher(m: "Matcher") -> None:
-    _live_matchers.append(m)
+    _live_matchers.add(m)
 
 
 def cleanup_all():
-    for c in _live_compilers:
-        _safe_destroy(c, "Compiler")
-    for m in _live_matchers:
+    global _is_shutting_down
+    _is_shutting_down = True
+    for m in list(_live_matchers):
         _safe_destroy(m, "Matcher")
+    for c in list(_live_compilers):
+        _safe_destroy(c, "Compiler")
+    _live_matchers.clear()
+    _live_compilers.clear()
 
 
 atexit.register(cleanup_all)

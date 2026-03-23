@@ -19,7 +19,9 @@ typedef struct omega_list_matcher_struct omega_list_matcher_t;
 typedef struct {
   size_t offset;        // Byte offset in haystack
   uint32_t len;         // Length of the match
+  uint32_t _reserved;   // Padding for alignment
   const uint8_t *match; // Pointer to matched bytes in haystack
+  uint64_t key;         // User-defined key (0 if not compiled with keys)
 } omega_match_result_t;
 
 // Collection of match results
@@ -71,6 +73,19 @@ omega_list_matcher_compiler_create(const char *restrict compiled_file,
 int omega_list_matcher_compiler_add_pattern(
     omega_list_matcher_compiler_t *restrict compiler,
     const uint8_t *restrict pattern, uint32_t len);
+
+/**
+ * Add a single pattern with a user-defined key to the compiler.
+ * The key is an opaque 8-byte value that will be included in match results.
+ * @param compiler Compiler handle.
+ * @param pattern Pointer to pattern bytes.
+ * @param len Length in bytes of the pattern.
+ * @param key User-defined 64-bit key associated with this pattern.
+ * @return 0 on success, -1 on error.
+ */
+int omega_list_matcher_compiler_add_pattern_with_key(
+    omega_list_matcher_compiler_t *restrict compiler,
+    const uint8_t *restrict pattern, uint32_t len, uint64_t key);
 
 /**
  * Get pattern store statistics from the compiler.

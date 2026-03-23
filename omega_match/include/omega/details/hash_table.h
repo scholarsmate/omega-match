@@ -16,6 +16,6 @@ int probe_bucket(const uint8_t *restrict control_bytes,
                  const uint8_t *restrict bucket_data, uint32_t table_mask,
                  uint32_t cand, uint32_t *slot_offset);
 void hash_table_insert(hash_table_t *restrict table, uint32_t key,
-                       uint64_t offset, uint32_t len);
+                       uint64_t offset, uint32_t len, uint64_t user_key);
 
 #endif // OMEGA_LIST_MATCHER__DETAILS__HASH_TABLE_H

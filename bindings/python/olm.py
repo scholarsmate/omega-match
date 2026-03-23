@@ -9,11 +9,99 @@ import sys
 
 from omega_match import Compiler, Matcher, get_library_info, get_version
 
-# Force stdout to use Unix-style line endings explicitly on Windows
-if os.name == "nt":
-    sys.stdout = io.TextIOWrapper(
-        sys.stdout.buffer, newline="\n", encoding=sys.stdout.encoding
-    )
+UINT64_MAX = (1 << 64) - 1
+
+def _configure_cli_stdout() -> None:
+    if os.name == "nt":
+        sys.stdout = io.TextIOWrapper(
+            sys.stdout.buffer, newline="\n", encoding=sys.stdout.encoding
+        )
+
+
+def _hex_digit_value(ch: int) -> int:
+    if 48 <= ch <= 57:
+        return ch - 48
+    if 65 <= ch <= 70:
+        return ch - 55
+    if 97 <= ch <= 102:
+        return ch - 87
+    return -1
+
+
+def _parse_uint64_prefix(data: bytes) -> tuple[int, int]:
+    length = len(data)
+    idx = 0
+
+    while idx < length and data[idx] in b" \t\v\f\r":
+        idx += 1
+    if idx >= length:
+        raise ValueError("missing key")
+    if data[idx] == ord("-"):
+        raise ValueError("negative keys are not allowed")
+    if data[idx] == ord("+"):
+        idx += 1
+        if idx >= length:
+            raise ValueError("missing key")
+
+    if data[idx] == ord("0"):
+        if idx + 1 < length and data[idx + 1] in (ord("x"), ord("X")):
+            idx += 2
+            if idx >= length:
+                raise ValueError("missing hex digits")
+            value = 0
+            digits = 0
+            while idx < length:
+                digit = _hex_digit_value(data[idx])
+                if digit < 0:
+                    break
+                if value > ((UINT64_MAX - digit) // 16):
+                    raise ValueError("key out of range")
+                value = (value << 4) + digit
+                idx += 1
+                digits += 1
+            if digits == 0:
+                raise ValueError("missing hex digits")
+            return value, idx
+
+        value = 0
+        idx += 1
+        while idx < length and 48 <= data[idx] <= 55:
+            digit = data[idx] - 48
+            if value > ((UINT64_MAX - digit) // 8):
+                raise ValueError("key out of range")
+            value = (value << 3) + digit
+            idx += 1
+        return value, idx
+
+    if not (48 <= data[idx] <= 57):
+        raise ValueError("missing key")
+
+    value = 0
+    while idx < length and 48 <= data[idx] <= 57:
+        digit = data[idx] - 48
+        if value > ((UINT64_MAX - digit) // 10):
+            raise ValueError("key out of range")
+        value = value * 10 + digit
+        idx += 1
+    return value, idx
+
+
+def _parse_first_keyed_record(line: bytes) -> tuple[int, bytes, bytes]:
+    key, end = _parse_uint64_prefix(line)
+    if end >= len(line):
+        raise ValueError("missing delimiter")
+    delim = bytes([line[end]])
+    return key, delim, line[end + 1 :]
+
+
+def _parse_keyed_record(line: bytes, delim: bytes) -> tuple[int, bytes]:
+    parts = line.split(delim, 1)
+    if len(parts) != 2:
+        raise LookupError("missing delimiter")
+    key, end = _parse_uint64_prefix(parts[0])
+    if end != len(parts[0]):
+        raise ValueError("invalid key")
+    return key, parts[1]
 
 
 def compile_mode(
@@ -22,16 +110,72 @@ def compile_mode(
     case_insensitive: bool,
     ignore_punctuation: bool,
     elide_whitespace: bool,
+    keyed: bool,
     verbose: bool,
 ) -> None:
-    with Compiler(
+    compiler = Compiler(
         output_file, case_insensitive, ignore_punctuation, elide_whitespace
-    ) as compiler, open(patterns_file, "rb") as f:
-        for line in f:
-            pattern = line.rstrip(b"\r\n")
-            if pattern:
-                compiler.add_pattern(pattern)
+    )
+    stats = None
+    failed = False
+
+    try:
+        with open(patterns_file, "rb") as f:
+            delim: bytes | None = None
+            first_key_line_num: int | None = None
+            for line_num, line in enumerate(f, 1):
+                line = line.rstrip(b"\r\n")
+                if not line:
+                    continue
+                if keyed:
+                    if delim is None:
+                        first_key_line_num = line_num
+                        try:
+                            key, delim, pattern = _parse_first_keyed_record(line)
+                        except ValueError:
+                            print(
+                                f"Error: cannot detect delimiter from line {first_key_line_num}.",
+                                file=sys.stderr,
+                            )
+                            failed = True
+                            raise SystemExit(1)
+                        if verbose:
+                            print(
+                                f"Auto-detected delimiter: {delim!r}",
+                                file=sys.stderr,
+                            )
+                        if pattern:
+                            compiler.add_pattern(pattern, key=key)
+                        continue
+
+                    try:
+                        key, pattern = _parse_keyed_record(line, delim)
+                    except LookupError:
+                        print(
+                            f"Warning: line {line_num} has no {delim!r} delimiter, skipping.",
+                            file=sys.stderr,
+                        )
+                        continue
+                    except ValueError:
+                        print(
+                            f"Warning: line {line_num} has invalid key, skipping.",
+                            file=sys.stderr,
+                        )
+                        continue
+
+                    if pattern:
+                        compiler.add_pattern(pattern, key=key)
+                elif line:
+                    compiler.add_pattern(line)
+
         stats = compiler.get_stats()
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        compiler.destroy()
+        if failed and os.path.exists(output_file):
+            os.unlink(output_file)
 
     if verbose:
         print("Stored pattern count:", stats.stored_pattern_count, file=sys.stderr)
@@ -40,8 +184,13 @@ def compile_mode(
         print("Duplicates removed:", stats.duplicate_patterns, file=sys.stderr)
         print("Input bytes:", stats.total_input_bytes, file=sys.stderr)
         print("Stored bytes:", stats.total_stored_bytes, file=sys.stderr)
+        ratio = (
+            stats.total_stored_bytes / stats.total_input_bytes
+            if stats.total_input_bytes
+            else 0.0
+        )
         print(
-            "Ratio: {:.2f}".format(stats.total_stored_bytes / stats.total_input_bytes),
+            "Ratio: {:.2f}".format(ratio),
             file=sys.stderr,
         )
         print("Compile completed successfully", file=sys.stderr)
@@ -63,6 +212,7 @@ def match_mode(
     line_end: bool,
     threads: int,
     chunk_size: int,
+    show_keys: bool,
     verbose: bool,
 ) -> None:
     with open(haystack_file, "rb") as f:
@@ -105,15 +255,21 @@ def match_mode(
         try:
             for r in results:
                 # Always emit Unix-style newlines
-                output_stream.write(
-                    f"{r.offset}:{r.match.decode('utf-8', errors='replace')}\n"
-                )
+                if show_keys:
+                    output_stream.write(
+                        f"{r.offset}:{r.key}:{r.match.decode('utf-8', errors='replace')}\n"
+                    )
+                else:
+                    output_stream.write(
+                        f"{r.offset}:{r.match.decode('utf-8', errors='replace')}\n"
+                    )
         finally:
             if output_file and output_stream != sys.stdout:
                 output_stream.close()
 
 
 def main() -> None:
+    _configure_cli_stdout()
     parser = argparse.ArgumentParser(description="Pattern matching tool")
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose output"
@@ -141,6 +297,11 @@ def main() -> None:
     )
     compile_parser.add_argument(
         "--elide-whitespace", action="store_true", help="Remove whitespace in patterns"
+    )
+    compile_parser.add_argument(
+        "--keyed",
+        action="store_true",
+        help="Read KEY<delim>PATTERN lines (delimiter auto-detected from first record)",
     )
 
     # Match mode parser
@@ -190,6 +351,9 @@ def main() -> None:
     match_parser.add_argument(
         "--chunk-size", type=int, default=0, help="Chunk size for parallel processing"
     )
+    match_parser.add_argument(
+        "--show-keys", action="store_true", help="Include pattern keys in output"
+    )
 
     # Try to enable argcomplete (if available)
     try:
@@ -221,6 +385,7 @@ def main() -> None:
             case_insensitive=args.ignore_case,
             ignore_punctuation=args.ignore_punctuation,
             elide_whitespace=args.elide_whitespace,
+            keyed=args.keyed,
             verbose=args.verbose,
         )
     elif args.mode == "match":
@@ -240,6 +405,7 @@ def main() -> None:
             line_end=args.line_end,
             threads=args.threads,
             chunk_size=args.chunk_size,
+            show_keys=args.show_keys,
             verbose=args.verbose,
         )
 
