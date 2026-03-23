@@ -218,6 +218,56 @@ for result in results:
     print(f"Found: {result.match} at offset {result.offset}")
 ```
 
+## Reactor API
+
+The Python bindings include a higher-level `Reactor` API for rule-driven rewrites.
+
+For the larger architecture and runnable examples, see the repository docs:
+
+- `docs/reactor-design.md`
+- `docs/reactor-guide.md`
+
+```python
+from omega_match import Compiler, Matcher, Reactor, RewriteAction
+
+with Compiler("rules.olm") as compiler:
+    compiler.add_pattern(b"ALERT", key=1)
+    compiler.add_pattern(b"alice", key=2)
+
+with Matcher("rules.olm") as matcher, Reactor() as reactor:
+    reactor.add_builtin(1, "lower")
+
+    def redact_person(match):
+        return RewriteAction.replace(match, b"PERSON-1")
+
+    reactor.add_callback(2, redact_person)
+
+    emission = reactor.plan(matcher, b"ALERT alice")
+    rewritten = reactor.rewrite_bytes(matcher, b"ALERT alice")
+
+print([action.data for action in emission.actions])
+print(rewritten)
+```
+
+Performance model:
+
+- builtin-only reactors stay on the native fast path
+- native plugin reactors stay on the native fast path
+- reactors with Python callbacks still use native matching, but action emission runs in Python
+
+Python callbacks may return:
+
+- `None`
+- a single `RewriteAction`
+- a single `ReactorSideEffect`
+- a `ReactorEmission`
+- a flat sequence of `RewriteAction` / `ReactorSideEffect` values
+
+`Reactor.plan(...)` returns a `ReactorEmission` containing:
+
+- `actions`: byte edits that can be lowered into a `RewriteScript`
+- `side_effects`: out-of-band events such as entity maps or audit records
+
 ## olm.py
 
 `olm.py` is a command-line tool for compiling pattern lists and matching them against text files using the omega_match engine. It provides two main modes:

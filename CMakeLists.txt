@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(omega_match VERSION 0.2.1 LANGUAGES C)
+project(omega_match VERSION 0.2.1 LANGUAGES C CXX)
 
 # Project Version - try to determine from git first, then fallback to hardcoded
 find_package(Git QUIET)
@@ -53,6 +53,7 @@ option(OMEGA_MATCH_WARNINGS_AS_ERRORS "Treat warnings as errors" ON)
 option(OMEGA_MATCH_ENABLE_LTO "Enable link-time optimization (IPO/LTO) for Release builds" OFF)
 option(OMEGA_MATCH_MARCH_NATIVE "Compile with -march=native for Release builds (GCC/Clang only)" OFF)
 option(OMEGA_MATCH_MTUNE_NATIVE "Compile with -mtune=native for Release builds (GCC/Clang only)" OFF)
+option(OMEGA_MATCH_ENABLE_OMEGA_EDIT "Enable OmegaEdit-backed rewrite application when a local checkout is present" OFF)
 
 # Enable sanitizers for memory and undefined behavior
 option(ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
@@ -111,6 +112,7 @@ if(ENABLE_PGO_USE)
         set(PGO_MERGED_PROFILE "${PGO_PROFILE_DIR}/merged.profdata")
         if(EXISTS ${PGO_MERGED_PROFILE})
             add_compile_options(-fprofile-instr-use=${PGO_MERGED_PROFILE})
+            add_compile_options(-Wno-error=profile-instr-unprofiled)
             add_link_options(-fprofile-instr-use=${PGO_MERGED_PROFILE})
             message(STATUS "Using Clang PGO profile: ${PGO_MERGED_PROFILE}")
         else()
@@ -153,10 +155,22 @@ file(GLOB OMEGA_MATCH_SOURCES CONFIGURE_DEPENDS
         "omega_match/src/matcher.c"
         "omega_match/src/pattern_store.c"
         "omega_match/src/pattern_store_append.c"
+        "omega_match/src/reactor.c"
+        "omega_match/src/rewrite.c"
         "omega_match/src/transform_table.c"
         "omega_match/src/util.c"
         "omega_match/src/version.c"
 )
+
+set(OMEGA_MATCH_HAVE_OMEGA_EDIT FALSE)
+if (OMEGA_MATCH_ENABLE_OMEGA_EDIT AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/extern/omega-edit/core/CMakeLists.txt")
+    set(OMEGA_EDIT_EMBED_MODE ON CACHE BOOL "" FORCE)
+    set(omega_edit_SHARED_LIBS ON CACHE BOOL "" FORCE)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/extern/omega-edit/core"
+                     "${CMAKE_CURRENT_BINARY_DIR}/omega-edit-core"
+                     EXCLUDE_FROM_ALL)
+    set(OMEGA_MATCH_HAVE_OMEGA_EDIT TRUE)
+endif()
 
 configure_file(
         omega_match/include/omega/details/version.h.in
@@ -181,6 +195,10 @@ target_include_directories(omega_match_static
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/omega_match/include>
     $<INSTALL_INTERFACE:include>)
 target_compile_features(omega_match_static PUBLIC c_std_17)
+if (OMEGA_MATCH_HAVE_OMEGA_EDIT)
+    target_compile_definitions(omega_match_static PRIVATE OMEGA_MATCH_HAVE_OMEGA_EDIT=1)
+    target_link_libraries(omega_match_static PRIVATE $<BUILD_INTERFACE:omega_edit::omega_edit>)
+endif()
 
 # Apply PGO or aggressive optimization to static library
 if (ENABLE_PGO_GENERATE AND CMAKE_C_COMPILER_ID STREQUAL "MSVC")
@@ -207,6 +225,10 @@ target_include_directories(omega_match_shared
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/omega_match/include>
     $<INSTALL_INTERFACE:include>)
 target_compile_features(omega_match_shared PUBLIC c_std_17)
+if (OMEGA_MATCH_HAVE_OMEGA_EDIT)
+    target_compile_definitions(omega_match_shared PRIVATE OMEGA_MATCH_HAVE_OMEGA_EDIT=1)
+    target_link_libraries(omega_match_shared PRIVATE $<BUILD_INTERFACE:omega_edit::omega_edit>)
+endif()
 
 # Use aggressive standard optimization for shared library (avoid PGO database issues)
 if (CMAKE_BUILD_TYPE STREQUAL "Release" AND CMAKE_C_COMPILER_ID STREQUAL "MSVC")
@@ -468,53 +490,89 @@ if (OMEGA_MATCH_BUILD_CLI)
 endif()
 
 # ---------------------------------------------------------------------------
+# Native reactor test plugin
+# ---------------------------------------------------------------------------
+add_library(omega_match_test_reactor_plugin SHARED
+    tests/plugins/test_native_reactor_plugin.c)
+target_include_directories(omega_match_test_reactor_plugin
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/omega_match/include)
+target_link_libraries(omega_match_test_reactor_plugin PRIVATE omega_match_shared)
+target_compile_features(omega_match_test_reactor_plugin PRIVATE c_std_17)
+if (WIN32)
+    set_target_properties(omega_match_test_reactor_plugin PROPERTIES
+        RUNTIME_OUTPUT_NAME omega_match_test_reactor_plugin
+        ARCHIVE_OUTPUT_NAME omega_match_test_reactor_plugin
+        WINDOWS_EXPORT_ALL_SYMBOLS ON)
+else()
+    set_target_properties(omega_match_test_reactor_plugin PROPERTIES
+        OUTPUT_NAME omega_match_test_reactor_plugin)
+endif()
+
+# ---------------------------------------------------------------------------
 # Install rules
 # ---------------------------------------------------------------------------
 
 # Always install static library
-install(TARGETS omega_match_static
+if (OMEGA_MATCH_HAVE_OMEGA_EDIT)
+    install(TARGETS omega_match_static
+            ARCHIVE DESTINATION lib
+            LIBRARY DESTINATION lib
+            RUNTIME DESTINATION bin)
+else()
+    install(TARGETS omega_match_static
+            EXPORT omega_matchTargets
+            ARCHIVE DESTINATION lib
+            LIBRARY DESTINATION lib
+            RUNTIME DESTINATION bin)
+endif()
+
+# Install both static and shared libraries
+if (OMEGA_MATCH_HAVE_OMEGA_EDIT)
+    install(TARGETS omega_match_shared
+        ARCHIVE DESTINATION lib
+        LIBRARY DESTINATION lib
+        RUNTIME DESTINATION bin)
+else()
+    install(TARGETS omega_match_shared
         EXPORT omega_matchTargets
         ARCHIVE DESTINATION lib
         LIBRARY DESTINATION lib
         RUNTIME DESTINATION bin)
-
-# Install both static and shared libraries
-install(TARGETS omega_match_shared
-    EXPORT omega_matchTargets
-    ARCHIVE DESTINATION lib
-    LIBRARY DESTINATION lib
-    RUNTIME DESTINATION bin)
+endif()
 
 install(DIRECTORY omega_match/include/ DESTINATION omega_match/include)
 
 # ---------------------------------------------------------------------------
 # CMake package config (optional but now functional)
 # ---------------------------------------------------------------------------
-include(CMakePackageConfigHelpers)
+if (NOT OMEGA_MATCH_HAVE_OMEGA_EDIT)
+    include(CMakePackageConfigHelpers)
 
-export(EXPORT omega_matchTargets
-        FILE "${CMAKE_CURRENT_BINARY_DIR}/omega_matchTargets.cmake"
-        NAMESPACE omega_match::)
+    export(EXPORT omega_matchTargets
+            FILE "${CMAKE_CURRENT_BINARY_DIR}/omega_matchTargets.cmake"
+            NAMESPACE omega_match::)
 
-write_basic_package_version_file(
-        "${CMAKE_CURRENT_BINARY_DIR}/omega_matchConfigVersion.cmake"
-        VERSION ${PROJECT_VERSION}
-        COMPATIBILITY SameMajorVersion)
+    write_basic_package_version_file(
+            "${CMAKE_CURRENT_BINARY_DIR}/omega_matchConfigVersion.cmake"
+            VERSION ${PROJECT_VERSION}
+            COMPATIBILITY SameMajorVersion)
 
-configure_package_config_file(
-        cmake/omega_matchConfig.cmake.in                    # small template – see below
-        "${CMAKE_CURRENT_BINARY_DIR}/omega_matchConfig.cmake"
-        INSTALL_DESTINATION lib/cmake/omega_match)
+    configure_package_config_file(
+            cmake/omega_matchConfig.cmake.in                    # small template – see below
+            "${CMAKE_CURRENT_BINARY_DIR}/omega_matchConfig.cmake"
+            INSTALL_DESTINATION lib/cmake/omega_match)
 
-install(FILES
-        "${CMAKE_CURRENT_BINARY_DIR}/omega_matchConfig.cmake"
-        "${CMAKE_CURRENT_BINARY_DIR}/omega_matchConfigVersion.cmake"
-        DESTINATION lib/cmake/omega_match)
+    install(FILES
+            "${CMAKE_CURRENT_BINARY_DIR}/omega_matchConfig.cmake"
+            "${CMAKE_CURRENT_BINARY_DIR}/omega_matchConfigVersion.cmake"
+            DESTINATION lib/cmake/omega_match)
 
-install(EXPORT omega_matchTargets
-        FILE omega_matchTargets.cmake
-        NAMESPACE omega_match::
-        DESTINATION lib/cmake/omega_match)
+    install(EXPORT omega_matchTargets
+            FILE omega_matchTargets.cmake
+            NAMESPACE omega_match::
+            DESTINATION lib/cmake/omega_match)
+endif()
 
 # ---------------------------------------------------------------------------
 # Packaging with CPack
@@ -596,6 +654,26 @@ if (WIN32)
                 "${PYBINDINGS_LIB_DIR}/libomega_match-windows-x64${PGO_SUFFIX}.dll"
             COMMENT "Copying Windows x64 DLL to Python bindings native/lib directory (PGO suffix: ${PGO_SUFFIX})"
         )
+        add_custom_command(TARGET omega_match_shared POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:omega_match_shared>
+                "${PYBINDINGS_LIB_DIR}/$<TARGET_FILE_NAME:omega_match_shared>"
+            COMMENT "Copying canonical OmegaMatch DLL to Python bindings native/lib directory"
+        )
+        if (OMEGA_MATCH_HAVE_OMEGA_EDIT)
+            add_custom_command(TARGET omega_match_shared POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_FILE:omega_edit>
+                    "${PYBINDINGS_LIB_DIR}/$<TARGET_FILE_NAME:omega_edit>"
+                COMMENT "Copying OmegaEdit runtime DLL to Python bindings native/lib directory"
+            )
+        endif()
+        add_custom_command(TARGET omega_match_test_reactor_plugin POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:omega_match_test_reactor_plugin>
+                "${PYBINDINGS_LIB_DIR}/$<TARGET_FILE_NAME:omega_match_test_reactor_plugin>"
+            COMMENT "Copying native reactor test plugin to Python bindings native/lib directory"
+        )
     endif()
 elseif(APPLE)
     if (CMAKE_OSX_ARCHITECTURES MATCHES "arm64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
@@ -605,12 +683,24 @@ elseif(APPLE)
                 "${PYBINDINGS_LIB_DIR}/libomega_match-macos-arm64${PGO_SUFFIX}.dylib"
             COMMENT "Copying macOS arm64 dylib to Python bindings native/lib directory (PGO suffix: ${PGO_SUFFIX})"
         )
+        add_custom_command(TARGET omega_match_shared POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:omega_match_shared>
+                "${PYBINDINGS_LIB_DIR}/$<TARGET_FILE_NAME:omega_match_shared>"
+            COMMENT "Copying canonical OmegaMatch dylib to Python bindings native/lib directory"
+        )
     elseif (CMAKE_OSX_ARCHITECTURES MATCHES "x86_64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
         add_custom_command(TARGET omega_match_shared POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 $<TARGET_FILE:omega_match_shared>
                 "${PYBINDINGS_LIB_DIR}/libomega_match-macos-x64${PGO_SUFFIX}.dylib"
             COMMENT "Copying macOS x64 dylib to Python bindings native/lib directory (PGO suffix: ${PGO_SUFFIX})"
+        )
+        add_custom_command(TARGET omega_match_shared POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:omega_match_shared>
+                "${PYBINDINGS_LIB_DIR}/$<TARGET_FILE_NAME:omega_match_shared>"
+            COMMENT "Copying canonical OmegaMatch dylib to Python bindings native/lib directory"
         )
     endif()
 elseif(UNIX)
@@ -621,6 +711,12 @@ elseif(UNIX)
                 "${PYBINDINGS_LIB_DIR}/libomega_match-linux-x64${PGO_SUFFIX}.so"
             COMMENT "Copying Linux x64 .so to Python bindings native/lib directory (PGO suffix: ${PGO_SUFFIX})"
         )
+        add_custom_command(TARGET omega_match_shared POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:omega_match_shared>
+                "${PYBINDINGS_LIB_DIR}/$<TARGET_FILE_NAME:omega_match_shared>"
+            COMMENT "Copying canonical OmegaMatch .so to Python bindings native/lib directory"
+        )
     elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
         add_custom_command(TARGET omega_match_shared POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -628,7 +724,31 @@ elseif(UNIX)
                 "${PYBINDINGS_LIB_DIR}/libomega_match-linux-arm64${PGO_SUFFIX}.so"
             COMMENT "Copying Linux arm64 .so to Python bindings native/lib directory (PGO suffix: ${PGO_SUFFIX})"
         )
+        add_custom_command(TARGET omega_match_shared POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:omega_match_shared>
+                "${PYBINDINGS_LIB_DIR}/$<TARGET_FILE_NAME:omega_match_shared>"
+            COMMENT "Copying canonical OmegaMatch .so to Python bindings native/lib directory"
+        )
     endif()
+endif()
+
+if (OMEGA_MATCH_HAVE_OMEGA_EDIT AND NOT WIN32)
+    add_custom_command(TARGET omega_match_shared POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:omega_edit>
+            "${PYBINDINGS_LIB_DIR}/$<TARGET_FILE_NAME:omega_edit>"
+        COMMENT "Copying OmegaEdit shared library to Python bindings native/lib directory"
+    )
+endif()
+
+if (NOT WIN32)
+    add_custom_command(TARGET omega_match_test_reactor_plugin POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:omega_match_test_reactor_plugin>
+            "${PYBINDINGS_LIB_DIR}/$<TARGET_FILE_NAME:omega_match_test_reactor_plugin>"
+        COMMENT "Copying native reactor test plugin to Python bindings native/lib directory"
+    )
 endif()
 
 # ---------------------------------------------------------------------------
