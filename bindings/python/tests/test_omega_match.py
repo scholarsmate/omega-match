@@ -1,9 +1,11 @@
 # tests/test_omega_match.py
 
 import os
+import re
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -14,10 +16,19 @@ from olm import (
     compile_mode,
 )
 from omega_match.omega_match import (
+    BuiltinReactor,
+    BuiltinReactorRule,
     Compiler,
     Matcher,
     MatchStats,
     PatternStoreStats,
+    NativePluginReactor,
+    Reactor,
+    ReactorEmission,
+    ReactorSideEffect,
+    RewriteScript,
+    RewriteAction,
+    _safe_destroy,
     get_version,
 )
 
@@ -32,6 +43,44 @@ def dispatch_results(results, handlers):
         handler = handlers[result.key]
         handler(result, events)
     return events
+
+
+def get_native_test_plugin_path() -> str:
+    native_dir = (
+        Path(__file__).resolve().parent.parent / "omega_match" / "native" / "lib"
+    )
+    if sys.platform.startswith("win"):
+        plugin_name = "omega_match_test_reactor_plugin.dll"
+    elif sys.platform == "darwin":
+        plugin_name = "libomega_match_test_reactor_plugin.dylib"
+    else:
+        plugin_name = "libomega_match_test_reactor_plugin.so"
+    return str(native_dir / plugin_name)
+
+
+def get_python_binding_root() -> str:
+    return str(Path(__file__).resolve().parent.parent)
+
+
+def run_python_example(tmp_path, script_name: str) -> subprocess.CompletedProcess[str]:
+    examples_dir = Path(__file__).resolve().parent.parent / "examples"
+    script_path = examples_dir / script_name
+    env = os.environ.copy()
+    python_root = get_python_binding_root()
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        python_root
+        if not existing_pythonpath
+        else python_root + os.pathsep + existing_pythonpath
+    )
+    return subprocess.run(
+        [sys.executable, str(script_path)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def test_get_version():
@@ -703,6 +752,299 @@ def test_pattern_reactor_large_same_bucket_dispatch(tmp_path):
         assert offset == expected_offset
 
 
+def test_builtin_reactor_emits_builtin_overwrite_actions(tmp_path):
+    output_path = str(tmp_path / "builtin_overwrite.olm")
+    with Compiler(output_path) as compiler:
+        compiler.add_pattern(b"mIxEd", key=11)
+        compiler.add_pattern(b"LOUD", key=12)
+        compiler.add_pattern(b"secret", key=13)
+        compiler.add_pattern(b"ignored", key=99)
+
+    with Matcher(output_path) as matcher, BuiltinReactor(
+        [
+            BuiltinReactorRule(11, BuiltinReactor.OP_UPPER),
+            BuiltinReactorRule(12, BuiltinReactor.OP_LOWER),
+            BuiltinReactorRule(13, BuiltinReactor.OP_REDACT, redact_byte=ord("X")),
+        ]
+    ) as reactor:
+        actions = reactor.plan(matcher, b"mIxEd LOUD secret ignored")
+
+    assert [
+        (action.start, action.end, action.rule_id, action.kind, action.data)
+        for action in actions
+    ] == [
+        (0, 5, 11, BuiltinReactor.KIND_OVERWRITE, b"MIXED"),
+        (6, 10, 12, BuiltinReactor.KIND_OVERWRITE, b"loud"),
+        (11, 17, 13, BuiltinReactor.KIND_OVERWRITE, b"XXXXXX"),
+    ]
+
+
+def test_builtin_reactor_uuid_replace_respects_match_filters(tmp_path):
+    output_path = str(tmp_path / "builtin_uuid.olm")
+    with Compiler(output_path) as compiler:
+        compiler.add_pattern(b"abc", key=21)
+        compiler.add_pattern(b"abcd", key=22)
+
+    uuid_pattern = re.compile(
+        rb"^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    )
+
+    with Matcher(output_path) as matcher, BuiltinReactor(
+        [
+            BuiltinReactorRule(21, BuiltinReactor.OP_UUID),
+            BuiltinReactorRule(22, BuiltinReactor.OP_UUID),
+        ]
+    ) as reactor:
+        all_actions = reactor.plan(matcher, b"xxabcdyy")
+        longest_actions = reactor.plan(matcher, b"xxabcdyy", longest_only=True)
+
+    assert [action.rule_id for action in all_actions] == [22, 21]
+    assert [action.kind for action in all_actions] == [
+        BuiltinReactor.KIND_REPLACE,
+        BuiltinReactor.KIND_REPLACE,
+    ]
+    assert [(action.start, action.end) for action in all_actions] == [(2, 6), (2, 5)]
+    assert len(longest_actions) == 1
+    assert longest_actions[0].rule_id == 22
+
+    for action in all_actions + longest_actions:
+        assert len(action.data) == 36
+        assert uuid_pattern.match(action.data), action.data
+
+
+def test_builtin_reactor_rejects_duplicate_rule_ids():
+    with pytest.raises(RuntimeError):
+        BuiltinReactor(
+            [
+                BuiltinReactorRule(7, BuiltinReactor.OP_UPPER),
+                BuiltinReactorRule(7, BuiltinReactor.OP_LOWER),
+            ]
+        )
+
+
+def test_rewrite_script_applies_reverse_order_variable_width_edits(tmp_path):
+    output_path = str(tmp_path / "rewrite_bytes.olm")
+    with Compiler(output_path) as compiler:
+        compiler.add_pattern(b"bob", key=31)
+        compiler.add_pattern(b"TAIL", key=32)
+
+    with Matcher(output_path) as matcher, BuiltinReactor(
+        [
+            BuiltinReactorRule(31, BuiltinReactor.OP_UUID),
+            BuiltinReactorRule(32, BuiltinReactor.OP_LOWER),
+        ]
+    ) as reactor, reactor.build_script(matcher, b"bob TAIL") as script:
+        ops = script.ops()
+        rewritten = script.apply_bytes(b"bob TAIL")
+
+    assert [(op.kind, op.offset, op.length, op.rule_id) for op in ops] == [
+        (BuiltinReactor.SCRIPT_OVERWRITE, 4, 4, 32),
+        (BuiltinReactor.SCRIPT_DELETE, 0, 3, 31),
+        (BuiltinReactor.SCRIPT_INSERT, 0, 0, 31),
+    ]
+    assert ops[0].data == b"tail"
+    assert len(ops[2].data) == 36
+    assert rewritten.endswith(b" tail")
+    assert re.match(
+        rb"^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} tail$",
+        rewritten,
+    )
+
+
+def test_rewrite_script_rejects_overlapping_edit_actions(tmp_path):
+    output_path = str(tmp_path / "rewrite_overlap.olm")
+    with Compiler(output_path) as compiler:
+        compiler.add_pattern(b"abc", key=41)
+        compiler.add_pattern(b"abcd", key=42)
+
+    with Matcher(output_path) as matcher, BuiltinReactor(
+        [
+            BuiltinReactorRule(41, BuiltinReactor.OP_UUID),
+            BuiltinReactorRule(42, BuiltinReactor.OP_UUID),
+        ]
+    ) as reactor:
+        with pytest.raises(RuntimeError):
+            reactor.build_script(matcher, b"xxabcdyy")
+
+
+def test_builtin_reactor_rewrite_bytes_helper(tmp_path):
+    output_path = str(tmp_path / "rewrite_helper.olm")
+    with Compiler(output_path) as compiler:
+        compiler.add_pattern(b"LOUD", key=51)
+        compiler.add_pattern(b"secret", key=52)
+
+    with Matcher(output_path) as matcher, BuiltinReactor(
+        [
+            BuiltinReactorRule(51, BuiltinReactor.OP_LOWER),
+            BuiltinReactorRule(52, BuiltinReactor.OP_REDACT, redact_byte=ord("*")),
+        ]
+    ) as reactor:
+        rewritten = reactor.rewrite_bytes(matcher, b"LOUD secret")
+
+    assert rewritten == b"loud ******"
+
+
+def test_rewrite_script_apply_omega_edit_matches_in_memory_replay(tmp_path):
+    if not RewriteScript.omega_edit_available():
+        pytest.skip("OmegaEdit adapter not available in this build")
+
+    output_path = str(tmp_path / "rewrite_file.olm")
+    with Compiler(output_path) as compiler:
+        compiler.add_pattern(b"bob", key=61)
+        compiler.add_pattern(b"TAIL", key=62)
+
+    input_path = tmp_path / "input.txt"
+    output_file = tmp_path / "output.txt"
+    input_bytes = b"bob TAIL"
+    input_path.write_bytes(input_bytes)
+
+    with Matcher(output_path) as matcher, BuiltinReactor(
+        [
+            BuiltinReactorRule(61, BuiltinReactor.OP_UUID),
+            BuiltinReactorRule(62, BuiltinReactor.OP_LOWER),
+        ]
+    ) as reactor, reactor.build_script(matcher, input_bytes) as script:
+        expected = script.apply_bytes(input_bytes)
+        script.apply_omega_edit(str(input_path), str(output_file))
+
+    assert output_file.read_bytes() == expected
+
+
+def test_native_plugin_reactor_dispatch_and_rewrite(tmp_path):
+    output_path = str(tmp_path / "native_plugin.olm")
+    with Compiler(output_path) as compiler:
+        compiler.add_pattern(b"alpha", key=201)
+        compiler.add_pattern(b"secret", key=202)
+        compiler.add_pattern(b"ignored", key=999)
+
+    plugin_path = get_native_test_plugin_path()
+    assert os.path.exists(plugin_path), plugin_path
+
+    with Matcher(output_path) as matcher, NativePluginReactor(plugin_path) as reactor:
+        actions = reactor.plan(matcher, b"alpha secret ignored")
+        rewritten = reactor.rewrite_bytes(matcher, b"alpha secret ignored")
+
+    assert [
+        (action.start, action.end, action.rule_id, action.kind, action.data)
+        for action in actions
+    ] == [
+        (0, 5, 201, BuiltinReactor.KIND_REPLACE, b"[alpha]"),
+        (6, 12, 202, BuiltinReactor.KIND_OVERWRITE, b"######"),
+    ]
+    assert rewritten == b"[alpha] ###### ignored"
+
+
+def test_native_plugin_reactor_rejects_missing_init_symbol():
+    plugin_path = get_native_test_plugin_path()
+    assert os.path.exists(plugin_path), plugin_path
+    with pytest.raises(RuntimeError):
+        NativePluginReactor(plugin_path, init_symbol="omega_reactor_plugin_init_missing")
+
+
+def test_native_plugin_reactor_rejects_sparse_rule_id_dispatch_table():
+    plugin_path = get_native_test_plugin_path()
+    assert os.path.exists(plugin_path), plugin_path
+    with pytest.raises(RuntimeError):
+        NativePluginReactor(plugin_path, init_symbol="omega_reactor_plugin_init_sparse_rule")
+
+
+def test_python_reactor_builtin_configuration_and_rewrite(tmp_path):
+    output_path = str(tmp_path / "python_reactor_builtin.olm")
+    with Compiler(output_path) as compiler:
+        compiler.add_pattern(b"mIxEd", key=301)
+        compiler.add_pattern(b"secret", key=302)
+
+    with Matcher(output_path) as matcher, Reactor() as reactor:
+        reactor.add_builtin(301, "upper")
+        reactor.add_builtin(302, "redact", redact_byte=ord("*"))
+        emission = reactor.plan(matcher, b"mIxEd secret")
+        rewritten = reactor.rewrite_bytes(matcher, b"mIxEd secret")
+
+    assert emission.side_effects == []
+    assert [
+        (action.start, action.end, action.rule_id, action.kind, action.data)
+        for action in emission.actions
+    ] == [
+        (0, 5, 301, BuiltinReactor.KIND_OVERWRITE, b"MIXED"),
+        (6, 12, 302, BuiltinReactor.KIND_OVERWRITE, b"******"),
+    ]
+    assert rewritten == b"MIXED ******"
+
+
+def test_python_reactor_callback_emits_actions_and_side_effects(tmp_path):
+    output_path = str(tmp_path / "python_reactor_callback.olm")
+    with Compiler(output_path) as compiler:
+        compiler.add_pattern(b"alice", key=401)
+
+    def callback(result):
+        return ReactorEmission(
+            actions=[RewriteAction.replace(result, b"PERSON-1")],
+            side_effects=[
+                ReactorSideEffect.for_match(
+                    result, "entity-map", payload={"replacement": "PERSON-1"}
+                )
+            ],
+        )
+
+    with Matcher(output_path) as matcher, Reactor() as reactor:
+        reactor.add_callback(401, callback)
+        emission = reactor.plan(matcher, b"alice met alice")
+        rewritten = reactor.rewrite_bytes(matcher, b"alice met alice")
+
+    assert rewritten == b"PERSON-1 met PERSON-1"
+    assert [action.data for action in emission.actions] == [b"PERSON-1", b"PERSON-1"]
+    assert [effect.kind for effect in emission.side_effects] == ["entity-map", "entity-map"]
+    assert emission.side_effects[0].payload == {"replacement": "PERSON-1"}
+
+
+def test_python_reactor_rejects_invalid_callback_return(tmp_path):
+    output_path = str(tmp_path / "python_reactor_bad_callback.olm")
+    with Compiler(output_path) as compiler:
+        compiler.add_pattern(b"alpha", key=501)
+
+    with Matcher(output_path) as matcher, Reactor() as reactor:
+        reactor.add_callback(501, lambda result: 123)
+        with pytest.raises(TypeError):
+            reactor.plan(matcher, b"alpha")
+
+
+def test_python_reactor_rejects_duplicate_rule_ids_across_builtin_and_callback():
+    with Reactor() as reactor:
+        reactor.add_builtin(701, "upper")
+        with pytest.raises(ValueError):
+            reactor.add_callback(701, lambda result: result)
+
+    with Reactor() as reactor:
+        reactor.add_callback(702, lambda result: result)
+        with pytest.raises(ValueError):
+            reactor.add_builtin(702, "lower")
+
+
+def test_python_reactor_ignores_unmatched_rule_ids_and_handles_empty_haystack(tmp_path):
+    output_path = str(tmp_path / "python_reactor_unmatched.olm")
+    with Compiler(output_path) as compiler:
+        compiler.add_pattern(b"alpha", key=801)
+
+    with Matcher(output_path) as matcher, Reactor() as reactor:
+        reactor.add_builtin(801, "upper")
+        reactor.add_callback(
+            999,
+            lambda result: ReactorEmission(
+                side_effects=[ReactorSideEffect.for_match(result, "unreachable")]
+            ),
+        )
+
+        empty_emission = reactor.plan(matcher, b"")
+        populated_emission = reactor.plan(matcher, b"alpha beta")
+        rewritten = reactor.rewrite_bytes(matcher, b"alpha beta")
+
+    assert empty_emission.actions == []
+    assert empty_emission.side_effects == []
+    assert [action.data for action in populated_emission.actions] == [b"ALPHA"]
+    assert populated_emission.side_effects == []
+    assert rewritten == b"ALPHA beta"
+
+
 def test_pattern_keys_same_bucket_capacity_growth_from_unkeyed_to_keyed(tmp_path):
     """Regression: growing a previously unkeyed bucket must zero legacy slots."""
     output_path = str(tmp_path / "same_bucket_growth.olm")
@@ -768,3 +1110,75 @@ def test_python_binding_shutdown_cleanup_exits_cleanly(tmp_path):
     )
 
     assert completed.returncode == 0, completed.stderr or completed.stdout
+
+
+def test_safe_destroy_tracks_state_per_object():
+    destroyed = []
+
+    class DummyDestroyable:
+        def __init__(self, name):
+            self.name = name
+            self._omega_destroyed = False
+            self._omega_destroying = False
+
+        def destroy(self):
+            destroyed.append(self.name)
+
+    first = DummyDestroyable("first")
+    second = DummyDestroyable("second")
+
+    _safe_destroy(first, "DummyDestroyable")
+    _safe_destroy(first, "DummyDestroyable")
+    _safe_destroy(second, "DummyDestroyable")
+
+    assert destroyed == ["first", "second"]
+
+
+@pytest.mark.parametrize(
+    ("script_name", "expected_output"),
+    [
+        ("reactor_redactor.py", "alice shared a XXXXXX and bob shared another XXXXXX"),
+        (
+            "reactor_hyperlinks.py",
+            'Visit <a href="https://example.com">https://example.com</a> and <a href="https://omega.dev">https://omega.dev</a> for details.',
+        ),
+        (
+            "reactor_acronyms.py",
+            "National Aeronautics and Space Administration (NASA) published an Application Programming Interface (API) update.",
+        ),
+    ],
+)
+def test_reactor_examples_smoke(tmp_path, script_name, expected_output):
+    completed = run_python_example(tmp_path, script_name)
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    assert completed.stdout.strip() == expected_output
+
+
+def test_reactor_uuid_sidecar_example_smoke(tmp_path):
+    completed = run_python_example(tmp_path, "reactor_uuid_sidecar.py")
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+
+    lines = [line for line in completed.stdout.splitlines() if line.strip()]
+    assert len(lines) == 5
+
+    rewritten = lines[0]
+    uuid_matches = re.findall(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        rewritten,
+    )
+    assert len(uuid_matches) == 4
+    assert "alice" not in rewritten
+    assert "bob" not in rewritten
+
+    payload_lines = lines[1:]
+    assert any("'original': 'alice'" in line for line in payload_lines)
+    assert any("'original': 'bob'" in line for line in payload_lines)
+
+
+def test_reactor_benchmark_example_smoke(tmp_path):
+    completed = run_python_example(tmp_path, "reactor_benchmark.py")
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    output = completed.stdout
+    assert "matcher only" in output
+    assert "builtin rewrite" in output
+    assert "python reactor" in output

@@ -10,6 +10,10 @@
 OmegaMatch is a high-performance, multi-threaded, multi-pattern matching library written in C. It combines a Bloom filter, hash table, and optimized "short matcher" to scan large content for multiple patterns in parallel.
 
 > Need build, performance benchmarking, PGO, or architecture details? See the **[Development & Performance Guide](DEVELOPMENT.md)**.
+>
+> Exploring the upcoming rewrite pipeline? See **[Documentation](docs/README.md)**, starting with the **[Reactor Design](docs/reactor-design.md)**.
+>
+> Want a practical walkthrough? See the **[Reactor Guide](docs/reactor-guide.md)**.
 
 ## Features
 
