@@ -64,7 +64,9 @@ typedef struct {
 /**
  * Create a builtin reactor from a set of rule IDs and builtin opcodes.
  * Rules are copied internally and may be freed by the caller after return.
- * Duplicate rule IDs or invalid opcodes cause failure and return NULL.
+ * Duplicate rule IDs, invalid opcodes, or a rule ID of 0 cause failure and
+ * return NULL. Rule ID 0 is reserved: matches from patterns compiled without
+ * a key carry key 0 and must never dispatch to a rule.
  */
 omega_builtin_reactor_t *omega_builtin_reactor_create(
     const omega_builtin_reactor_rule_t *restrict rules, size_t rule_count);
@@ -111,7 +113,9 @@ int omega_native_reactor_builder_destroy(
 
 /**
  * Add a native rule binding to the builder.
- * Duplicate rule IDs or NULL handlers cause failure and return -1.
+ * Duplicate rule IDs, NULL handlers, or a rule ID of 0 cause failure and
+ * return -1. Rule ID 0 is reserved: matches from patterns compiled without a
+ * key carry key 0 and must never dispatch to a rule.
  */
 int omega_native_reactor_builder_add_rule(
     omega_native_reactor_builder_t *restrict builder, uint64_t rule_id,

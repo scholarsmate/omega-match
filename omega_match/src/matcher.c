@@ -688,23 +688,20 @@ finalize_match_results(match_vector_t **restrict thread_matches,
     total += thread_matches[i]->count;
   }
 
-  // Prepare output vector
-  match_vector_t merged;
-  init_match_vector(&merged);
-  reserve_match_vector(&merged, total);
-
   // K-way merge state: one cursor per chunk
   run_t *runs = (run_t *)malloc(num_chunks * sizeof(run_t));
   if (unlikely(!runs)) {
     ABORT("finalize_match_results: malloc runs");
   }
   size_t active = 0;
+  match_vector_t *single = NULL; // the only non-empty vector when active == 1
   for (size_t i = 0; i < num_chunks; ++i) {
     match_vector_t *v = thread_matches[i];
     if (v->count > 0) {
       runs[active].arr = v->data;
       runs[active].len = v->count;
       runs[active].idx = 0;
+      single = v;
       ++active;
     }
   }
@@ -720,10 +717,62 @@ finalize_match_results(match_vector_t **restrict thread_matches,
     free(thread_matches);
     free(runs);
     omega_match_results_t *out = (omega_match_results_t *)malloc(sizeof(*out));
+    if (unlikely(!out)) {
+      ABORT("finalize_match_results: malloc results");
+    }
     out->count = 0;
     out->matches = NULL;
     return out;
   }
+
+  if (active == 1) {
+    // Single sorted run: no merge needed. Apply the on-merge filters in place
+    // and hand the run's buffer to the caller without copying.
+    size_t kept = single->count;
+    if (no_overlap || longest_only) {
+      omega_match_result_t *arr = single->data;
+      uint64_t last_offset = (uint64_t)-1;
+      uint64_t last_end = 0;
+      size_t w = 0;
+      for (size_t i = 0; i < single->count; ++i) {
+        const omega_match_result_t cur = arr[i];
+        if (longest_only && cur.offset == last_offset) {
+          continue; // already emitted longest at this offset
+        }
+        if (no_overlap && cur.offset < last_end) {
+          continue;
+        }
+        arr[w++] = cur;
+        last_offset = cur.offset;
+        if (no_overlap) {
+          const uint64_t end = cur.offset + cur.len;
+          if (end > last_end) {
+            last_end = end;
+          }
+        }
+      }
+      kept = w;
+    }
+    omega_match_results_t *out = (omega_match_results_t *)malloc(sizeof(*out));
+    if (unlikely(!out)) {
+      ABORT("finalize_match_results: malloc results");
+    }
+    out->count = kept;
+    out->matches = single->data;
+    single->data = NULL; // ownership transferred to the results
+    for (size_t i = 0; i < num_chunks; ++i) {
+      free_match_vector(thread_matches[i]);
+      free(thread_matches[i]);
+    }
+    free(thread_matches);
+    free(runs);
+    return out;
+  }
+
+  // Prepare output vector
+  match_vector_t merged;
+  init_match_vector(&merged);
+  reserve_match_vector(&merged, total);
 
   size_t *heap = (size_t *)malloc(active * sizeof(size_t));
   if (unlikely(!heap)) {
@@ -1332,7 +1381,14 @@ size_t normalize_haystack(const uint8_t *restrict input, size_t len,
   return out_pos;
 }
 
-// Case-insensitive wrapper using sliding uppercase
+// Transform-aware wrapper processing the haystack in overlapping windows so
+// matches spanning window boundaries are not lost. Each window carries one
+// byte of left context (for word/line start checks) and largest_pattern_length
+// bytes of right overlap so every match starting inside a window is fully
+// contained in it; matches starting in the overlap belong to the next window.
+// Per-window matching runs unfiltered and no_overlap/longest_only are applied
+// once in the global merge, keeping their greedy semantics consistent across
+// window boundaries.
 omega_match_results_t *omega_list_matcher_match(
     const omega_list_matcher_t *matcher, const uint8_t *haystack,
     const size_t haystack_size, const int no_overlap, const int longest_only,
@@ -1345,89 +1401,181 @@ omega_match_results_t *omega_list_matcher_match(
   }
 
   const size_t max_pat = matcher->header->largest_pattern_length;
-  const size_t chunk_size = CASE_INSENSITIVE_WINDOW_SIZE;
-  const size_t num_chunks = (haystack_size + chunk_size - 1) / chunk_size;
+  const size_t win_size = CASE_INSENSITIVE_WINDOW_SIZE;
+  const int flags = matcher->header->flags;
+  // Punctuation skipping and whitespace elision shrink the input, so windows
+  // must be cut in normalized coordinates with a backmap; case folding alone
+  // is 1:1 and windows can be cut directly in original coordinates.
+  const int needs_backmap =
+      (flags & (FLAG_IGNORE_PUNCTUATION | FLAG_ELIDE_WHITESPACE)) != 0;
 
-  uint8_t *buf = malloc(chunk_size + max_pat);
-  if (unlikely(!buf)) {
-    ABORT("malloc for buf"); // OOM
-  }
-  size_t *position_map = NULL;
-  if (matcher->header->flags & FLAG_IGNORE_PUNCTUATION ||
-      matcher->header->flags & FLAG_ELIDE_WHITESPACE) {
-    position_map = malloc((chunk_size + max_pat) * sizeof(size_t));
-    if (unlikely(!position_map)) {
-      ABORT("malloc for position_map"); // OOM
-    }
-  }
-
-  match_vector_t **chunk_vectors = calloc(num_chunks, sizeof(match_vector_t *));
-  if (unlikely(!chunk_vectors)) {
-    ABORT("calloc chunk_vectors"); // OOM
-  }
-
-  for (size_t chunk_idx = 0; chunk_idx < num_chunks; ++chunk_idx) {
-    const size_t base = chunk_idx * chunk_size;
-    const size_t rem = haystack_size - base;
-    const size_t win = rem < chunk_size ? rem : chunk_size;
-
+  if (!needs_backmap && haystack_size <= win_size) {
+    // Single 1:1 window: filters keep their semantics inside core_match, and
+    // offsets are unchanged, so only the match pointers need remapping from
+    // the normalized buffer back to the original haystack.
     uint32_t processed_len = 0;
-    const uint8_t *normalized = NULL;
-    // Fast-path hoist: if transform is case-insensitive only (no punctuation
-    // skipping and no whitespace elision), avoid building a backmap and reuse
-    // the transform buffer directly with 1:1 mapping semantics.
-    const int flags = matcher->header->flags;
-    if ((flags & FLAG_IGNORE_CASE) && !(flags & FLAG_IGNORE_PUNCTUATION) &&
-        !(flags & FLAG_ELIDE_WHITESPACE)) {
-      normalized = transform_apply(matcher->transform_table, haystack + base,
-                                   (uint32_t)win, &processed_len, NULL);
-    } else {
-      normalized = transform_apply(matcher->transform_table, haystack + base,
-                                   (uint32_t)win, &processed_len,
-                                   position_map);
-    }
-
+    const uint8_t *normalized =
+        transform_apply(matcher->transform_table, haystack,
+                        (uint32_t)haystack_size, &processed_len, NULL);
     omega_match_results_t *r = core_match(
         matcher, normalized, processed_len, no_overlap, longest_only,
         word_boundary, word_prefix, word_suffix, line_start, line_end);
     if (unlikely(!r)) {
       ABORT("core_match failed"); // OOM
     }
-    match_vector_t *local = calloc(1, sizeof(*local));
-    reserve_match_vector(local, r->count);
+    for (size_t i = 0; i < r->count; ++i) {
+      r->matches[i].match = haystack + r->matches[i].offset;
+    }
+    return r;
+  }
 
-  if (position_map) {
-      // Remap the offsets back to the original haystack
+  // Every non-final window consumes win_size bytes of input (a normalized
+  // byte consumes at least one original byte), so this bounds window count.
+  const size_t max_windows = haystack_size / win_size + 2;
+  match_vector_t **window_vectors =
+      calloc(max_windows, sizeof(match_vector_t *));
+  if (unlikely(!window_vectors)) {
+    ABORT("calloc window_vectors"); // OOM
+  }
+  size_t used = 0;
+
+  if (!needs_backmap) {
+    size_t base = 0; // original offset where this window's owned region starts
+    for (;;) {
+      const size_t lead = base > 0 ? 1 : 0;
+      const size_t start = base - lead;
+      const size_t want = lead + win_size + max_pat;
+      const size_t avail = haystack_size - start;
+      const size_t span = avail < want ? avail : want;
+      const int has_next = base + win_size < haystack_size;
+
+      uint32_t processed_len = 0;
+      const uint8_t *normalized =
+          transform_apply(matcher->transform_table, haystack + start,
+                          (uint32_t)span, &processed_len, NULL);
+      omega_match_results_t *r =
+          core_match(matcher, normalized, processed_len, 0, 0, word_boundary,
+                     word_prefix, word_suffix, line_start, line_end);
+      if (unlikely(!r)) {
+        ABORT("core_match failed"); // OOM
+      }
+
+      match_vector_t *local = calloc(1, sizeof(*local));
+      if (unlikely(!local)) {
+        ABORT("calloc window vector"); // OOM
+      }
+      reserve_match_vector(local, r->count);
+      const size_t keep_end = lead + win_size;
       for (size_t i = 0; i < r->count; ++i) {
         omega_match_result_t *m = &r->matches[i];
-        // Map cleaned offset back to the original haystack
-        const size_t original_offset = base + position_map[m->offset];
-        const size_t original_end = base + position_map[m->offset + m->len - 1];
+        if (m->offset < lead) {
+          continue; // left-context byte, owned by the previous window
+        }
+        if (has_next && m->offset >= keep_end) {
+          continue; // right overlap, owned by the next window
+        }
+        m->offset += start;
+        m->match = haystack + m->offset;
+        append_match(local, m);
+      }
+      omega_match_results_destroy(r);
+      window_vectors[used++] = local;
+
+      if (!has_next) {
+        break;
+      }
+      base += win_size;
+    }
+  } else {
+    // Stream the transform into a sliding buffer of normalized bytes with a
+    // per-byte backmap to original positions. A normalized match can span
+    // arbitrarily many original bytes (elided runs, skipped punctuation), so
+    // the overlap must be measured in normalized coordinates.
+    const size_t buf_cap = 1 + win_size + max_pat;
+    uint8_t *norm = malloc(buf_cap);
+    size_t *backmap = malloc(buf_cap * sizeof(size_t));
+    if (unlikely(!norm || !backmap)) {
+      ABORT("malloc transform window"); // OOM
+    }
+    const int16_t *restrict table = matcher->transform_table->table;
+
+    size_t src = 0;      // next original byte to consume
+    size_t norm_len = 0; // valid bytes in norm[]
+    size_t lead = 0;     // left-context bytes at the front of norm[]
+    int in_space = 0;    // whitespace-elision state, carried across windows
+    for (;;) {
+      const size_t fill_to = lead + win_size + max_pat;
+      while (norm_len < fill_to && src < haystack_size) {
+        const int16_t mapped = table[haystack[src]];
+        if (mapped == TRANSFORM_SKIP) {
+          ++src;
+          continue;
+        }
+        if (mapped == TRANSFORM_ELIDE_SPACE) {
+          if (!in_space) {
+            norm[norm_len] = ' ';
+            backmap[norm_len] = src;
+            ++norm_len;
+            in_space = 1;
+          }
+          ++src;
+          continue;
+        }
+        norm[norm_len] = (uint8_t)mapped;
+        backmap[norm_len] = src;
+        ++norm_len;
+        in_space = 0;
+        ++src;
+      }
+      const int has_next = src < haystack_size;
+
+      omega_match_results_t *r =
+          core_match(matcher, norm, norm_len, 0, 0, word_boundary, word_prefix,
+                     word_suffix, line_start, line_end);
+      if (unlikely(!r)) {
+        ABORT("core_match failed"); // OOM
+      }
+
+      match_vector_t *local = calloc(1, sizeof(*local));
+      if (unlikely(!local)) {
+        ABORT("calloc window vector"); // OOM
+      }
+      reserve_match_vector(local, r->count);
+      const size_t keep_end = lead + win_size;
+      for (size_t i = 0; i < r->count; ++i) {
+        omega_match_result_t *m = &r->matches[i];
+        if (m->offset < lead) {
+          continue; // left-context byte, owned by the previous window
+        }
+        if (has_next && m->offset >= keep_end) {
+          continue; // right overlap, owned by the next window
+        }
+        const size_t original_offset = backmap[m->offset];
+        const size_t original_end = backmap[m->offset + m->len - 1];
         m->offset = original_offset;
         m->len = (uint32_t)(original_end - original_offset + 1);
-        m->match = haystack + m->offset;
+        m->match = haystack + original_offset;
         append_match(local, m);
       }
-  } else {
-      // 1-to-1 mapping from normalized to original haystack
-      for (size_t i = 0; i < r->count; ++i) {
-        omega_match_result_t *m = &r->matches[i];
-        m->offset += base;
-        m->match = haystack + m->offset;
-        append_match(local, m);
+      omega_match_results_destroy(r);
+      window_vectors[used++] = local;
+
+      if (!has_next) {
+        break;
       }
+      // Slide: keep one byte of left context plus the right-overlap tail.
+      const size_t keep_from = keep_end - 1;
+      const size_t tail = norm_len - keep_from;
+      memmove(norm, norm + keep_from, tail);
+      memmove(backmap, backmap + keep_from, tail * sizeof(size_t));
+      norm_len = tail;
+      lead = 1;
     }
-
-    omega_match_results_destroy(r);
-    chunk_vectors[chunk_idx] = local;
+    free(norm);
+    free(backmap);
   }
 
-  free(buf);
-  if (position_map) {
-    free(position_map);
-  }
-
-  return finalize_match_results(chunk_vectors, num_chunks, no_overlap,
+  return finalize_match_results(window_vectors, used, no_overlap,
                                 longest_only);
 }
 

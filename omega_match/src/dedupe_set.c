@@ -61,27 +61,29 @@ static void dedup_set_resize(dedup_set_t *restrict set) {
   }
 
   for (uint32_t i = 0; i < old_size; ++i) {
-    dedup_entry_t *old = &old_entries[i];
-    if (!old->buf) {
+    if (!old_entries[i].buf) {
       continue;
     }
 
-    // Re-insert
-    uint32_t pos = old->hash & (set->size - 1);
+    // Re-insert with robin hood probing: when the carried entry is further
+    // from its home slot than the resident, they trade places and the
+    // displaced resident continues probing with its own distance.
+    dedup_entry_t carry = old_entries[i];
+    uint32_t pos = carry.hash & (set->size - 1);
     uint32_t dist = 0;
     while (set->entries[pos].buf) {
       if (dist > set->entries[pos].dist) {
-        // Swap
-        dedup_entry_t temp = set->entries[pos];
-        set->entries[pos] = *old;
-        *old = temp;
-        dist = old->dist;
+        const dedup_entry_t displaced = set->entries[pos];
+        carry.dist = dist;
+        set->entries[pos] = carry;
+        carry = displaced;
+        dist = displaced.dist;
       }
       ++dist;
       pos = (pos + 1) & (set->size - 1);
-      old->dist = dist;
     }
-    set->entries[pos] = *old;
+    carry.dist = dist;
+    set->entries[pos] = carry;
     ++set->used;
   }
 
@@ -97,41 +99,57 @@ int dedup_set_add(dedup_set_t *restrict set, const uint8_t *restrict buf,
   const uint32_t h = hash_buf(buf, len);
   uint32_t pos = h & (set->size - 1);
   uint32_t distance = 0;
+  dedup_entry_t carry; // displaced entry being re-seated once carrying is set
+  int carrying = 0;
 
   while (1) {
     dedup_entry_t *entry = &set->entries[pos];
     if (!entry->buf) {
-      // Insert new
-      entry->hash = h;
-      entry->len = (uint32_t)len;
-      entry->buf = malloc(len);
-      if (!entry->buf) {
-        ABORT("malloc dedup pattern buf");
+      if (carrying) {
+        carry.dist = distance;
+        *entry = carry;
+      } else {
+        entry->hash = h;
+        entry->len = (uint32_t)len;
+        entry->buf = malloc(len);
+        if (!entry->buf) {
+          ABORT("malloc dedup pattern buf");
+        }
+        memcpy(entry->buf, buf, len);
+        entry->dist = distance;
       }
-      memcpy(entry->buf, buf, len);
-      entry->dist = distance;
       ++set->used;
       return 1;
     }
 
-    if (entry->hash == h && entry->len == len &&
+    // Once a resident has been displaced the new element is already seated,
+    // and every carried entry is a known-unique member, so the duplicate
+    // check only applies while still probing for the new element.
+    if (!carrying && entry->hash == h && entry->len == len &&
         memcmp(entry->buf, buf, len) == 0) {
       return 0; // already exists
     }
 
     if (distance > entry->dist) {
-      // Robin hood swapping
-      const dedup_entry_t temp = *entry;
-      entry->hash = h;
-      entry->len = (uint32_t)len;
-      entry->buf = malloc(len);
-      if (!entry->buf) {
-        ABORT("malloc dedup pattern buf (robin hood)");
+      // Robin hood: the incoming element takes this slot and the displaced
+      // resident continues probing from here with its own distance.
+      const dedup_entry_t displaced = *entry;
+      if (carrying) {
+        carry.dist = distance;
+        *entry = carry;
+      } else {
+        entry->hash = h;
+        entry->len = (uint32_t)len;
+        entry->buf = malloc(len);
+        if (!entry->buf) {
+          ABORT("malloc dedup pattern buf (robin hood)");
+        }
+        memcpy(entry->buf, buf, len);
+        entry->dist = distance;
+        carrying = 1;
       }
-      memcpy(entry->buf, buf, len);
-      entry->dist = distance;
-      *entry = temp;
-      distance = entry->dist;
+      carry = displaced;
+      distance = displaced.dist;
     }
 
     ++distance;

@@ -822,6 +822,13 @@ def test_builtin_reactor_rejects_duplicate_rule_ids():
         )
 
 
+def test_builtin_reactor_rejects_rule_id_zero():
+    # Rule ID 0 is reserved: matches from patterns compiled without a key
+    # carry key 0, so a rule registered as 0 would fire on every unkeyed match
+    with pytest.raises(RuntimeError):
+        BuiltinReactor([BuiltinReactorRule(0, BuiltinReactor.OP_UPPER)])
+
+
 def test_rewrite_script_applies_reverse_order_variable_width_edits(tmp_path):
     output_path = str(tmp_path / "rewrite_bytes.olm")
     with Compiler(output_path) as compiler:

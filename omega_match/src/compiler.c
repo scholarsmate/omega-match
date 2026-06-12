@@ -359,6 +359,9 @@ int omega_list_matcher_compiler_add_pattern_with_key(
   if (compiler->transform_table) {
     pattern =
         transform_apply(compiler->transform_table, pattern, len, &len, NULL);
+    if (unlikely(len == 0)) {
+      return 0; // pattern normalized to nothing (e.g. all punctuation); skip
+    }
   }
   if (len <= 4) {
     if (unlikely(short_matcher_add(compiler, pattern, len, user_key) != 0)) {
@@ -410,7 +413,8 @@ int omega_list_matcher_compiler_destroy(
 
   // Create the bloom filter
   bloom_filter_t bf;
-  bloom_filter_init(&bf, compiler->table.size * BLOOM_NUM_BITS_PER_ENTRY);
+  bloom_filter_init(&bf, (size_t)((uint64_t)compiler->table.size *
+                                  BLOOM_NUM_BITS_PER_ENTRY));
 
   uint32_t min_bucket = UINT_MAX, max_bucket = 0;
   for (uint32_t i = 0; i < compiler->table.size; ++i) {
@@ -629,8 +633,16 @@ int omega_list_matcher_compiler_destroy(
 
   fseek(compiler->compiled_fp, 0, SEEK_SET);
   fwrite(&header, sizeof(compiled_header_t), 1, compiler->compiled_fp);
-  fflush(compiler->compiled_fp);
-  fclose(compiler->compiled_fp);
+  // The stream error flag is sticky, so this catches any earlier failed
+  // fwrite (e.g. disk full) as well as the final flush/close.
+  int status = 0;
+  if (fflush(compiler->compiled_fp) != 0 ||
+      ferror(compiler->compiled_fp) != 0) {
+    status = -1;
+  }
+  if (fclose(compiler->compiled_fp) != 0) {
+    status = -1;
+  }
   free((void *)compiler->compiled_file_name);
   hash_table_free(&compiler->table);
   if (compiler->transform_table) {
@@ -639,7 +651,7 @@ int omega_list_matcher_compiler_destroy(
   }
   short_matcher_free(compiler);
   free(compiler);
-  return 0;
+  return status;
 }
 
 int omega_list_matcher_compile_patterns(
@@ -698,7 +710,7 @@ int omega_list_matcher_compile_patterns_filename(
 
   // Check if the patterns file exists and is readable
   if (oa_matcher_access(patterns_file) != 0) {
-    ABORT("patterns_file not found or not readable");
+    return -1;
   }
 
   // Map the patterns file into memory

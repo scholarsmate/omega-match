@@ -371,7 +371,11 @@ omega_builtin_reactor_t *omega_builtin_reactor_create(
   reactor->rule_count = rule_count;
 
   for (i = 0; i < rule_count; ++i) {
-    if (!is_valid_opcode(reactor->rules[i].opcode)) {
+    // rule_id 0 is reserved: matches from patterns compiled without a key
+    // carry key 0, so a rule registered as 0 would fire on every unkeyed
+    // match.
+    if (reactor->rules[i].rule_id == 0 ||
+        !is_valid_opcode(reactor->rules[i].opcode)) {
       omega_builtin_reactor_destroy(reactor);
       return NULL;
     }
@@ -557,7 +561,10 @@ int omega_native_reactor_builder_add_rule(
     omega_native_reactor_builder_t *restrict builder, uint64_t rule_id,
     omega_native_reactor_handler_fn handler, void *handler_ctx) {
   omega_native_reactor_rule_t *rule;
-  if (!builder || !handler || builder_has_rule(builder, rule_id)) {
+  // rule_id 0 is reserved: matches from patterns compiled without a key
+  // carry key 0, so a rule registered as 0 would fire on every unkeyed match.
+  if (!builder || !handler || rule_id == 0 ||
+      builder_has_rule(builder, rule_id)) {
     return -1;
   }
   if (reserve_native_rules(builder, 1) != 0) {
@@ -768,7 +775,8 @@ omega_rewrite_plan_t *omega_native_reactor_plan_matches(
 
   for (i = 0; i < results->count; ++i) {
     const omega_match_result_t *match = &results->matches[i];
-    if ((size_t)match->key >= reactor->dispatch_size) {
+    // Compare in uint64 so high key bits are not truncated on 32-bit size_t
+    if (match->key >= (uint64_t)reactor->dispatch_size) {
       continue;
     }
     if (reactor->dispatch[match->key].handler) {
