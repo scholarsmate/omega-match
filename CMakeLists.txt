@@ -484,6 +484,8 @@ if (OMEGA_MATCH_BUILD_CLI)
     omega_match_add_python_test(aio_line_start_wb "${CMAKE_CURRENT_SOURCE_DIR}/tests/aio_line_start_wb.py")
     omega_match_add_python_test(aio_line_exact_match "${CMAKE_CURRENT_SOURCE_DIR}/tests/aio_line_exact_match.py")
     omega_match_add_python_test(compile_match "${CMAKE_CURRENT_SOURCE_DIR}/tests/compile_match.py")
+    omega_match_add_python_test(window_boundary "${CMAKE_CURRENT_SOURCE_DIR}/tests/window_boundary.py")
+    omega_match_add_python_test(cli_robustness "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_robustness.py")
 
     message(STATUS "Added core cross-platform tests: help, version, basic_match, compile")
     message(STATUS "Added Python-based cross-platform extended tests")

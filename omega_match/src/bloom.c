@@ -11,9 +11,22 @@
 
 // Initialize bloom filter (size in bits, rounded up to multiple of 64)
 void bloom_filter_init(bloom_filter_t *restrict bf, const size_t bit_size) {
-  const uint32_t byte_size = next_power_of_two(((bit_size + 63) & ~63ULL) >> 3);
-  bf->bit_size = byte_size << 3;
+  // bit_size is serialized as uint32 and must stay a power of two for the
+  // mask arithmetic, so the largest usable size is 2^31 bits (2^28 bytes);
+  // clamp oversized requests instead of wrapping to zero (a smaller filter
+  // only raises the false-positive rate, it stays correct).
+  uint64_t byte_size = (((uint64_t)bit_size + 63) & ~63ULL) >> 3;
+  if (byte_size < 8) {
+    byte_size = 8; // at least one 64-bit word so the mask has a home
+  }
+  byte_size = byte_size > (1ULL << 28)
+                  ? (1ULL << 28)
+                  : next_power_of_two((uint32_t)byte_size);
+  bf->bit_size = (uint32_t)(byte_size << 3);
   bf->bits = calloc(bf->bit_size >> 6, sizeof(uint64_t));
+  if (unlikely(!bf->bits)) {
+    ABORT("bloom_filter_init: calloc");
+  }
   memcpy(bf->header, BLOOM_HEADER, BLOOM_HEADER_SIZE);
 }
 

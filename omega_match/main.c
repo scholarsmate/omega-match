@@ -112,6 +112,44 @@ static void print_match_stats(const omega_match_stats_t *stats,
           (float)stats->total_comparisons / (float)results->count);
 }
 
+// Flush the output buffer to the file descriptor or console
+static void flush_output(const char *restrict buffer, size_t *restrict pos,
+                         const int fd, const int use_console_api) {
+  if (*pos == 0) {
+    return;
+  }
+  if (use_console_api) {
+    flush_buffer(buffer, *pos);
+  } else {
+    const ssize_t written = write(fd, buffer, *pos);
+    if (unlikely(written < 0)) {
+      perror("write");
+      ABORT("write");
+    }
+  }
+  *pos = 0;
+}
+
+// Append bytes to the output buffer, flushing whenever it fills. Match text
+// can exceed the buffer size, so this copies in bounded slices rather than
+// formatting whole lines.
+static void emit_output(char *restrict buffer, size_t *restrict pos,
+                        const void *restrict data, size_t len, const int fd,
+                        const int use_console_api) {
+  const char *src = (const char *)data;
+  while (len > 0) {
+    if (*pos == OUTPUT_BUFFER_SIZE) {
+      flush_output(buffer, pos, fd, use_console_api);
+    }
+    const size_t space = OUTPUT_BUFFER_SIZE - *pos;
+    const size_t n = len < space ? len : space;
+    memcpy(buffer + *pos, src, n);
+    *pos += n;
+    src += n;
+    len -= n;
+  }
+}
+
 // Print match results to given file descriptor or console
 static void print_results_buffered_fd(const omega_match_results_t *results,
                                       const int fd, const int use_console_api,
@@ -122,50 +160,24 @@ static void print_results_buffered_fd(const omega_match_results_t *results,
   }
 
   size_t pos = 0;
+  char prefix[64];
   for (size_t i = 0; i < results->count; ++i) {
     int n;
     if (show_keys) {
-      n = snprintf(output_buffer + pos, OUTPUT_BUFFER_SIZE - pos,
-                   "%zu:%" PRIu64 ":%.*s\n",
-                   results->matches[i].offset,
-                   results->matches[i].key,
-                   results->matches[i].len,
-                   (const char *)results->matches[i].match);
+      n = snprintf(prefix, sizeof(prefix), "%zu:%" PRIu64 ":",
+                   results->matches[i].offset, results->matches[i].key);
     } else {
-      n = snprintf(output_buffer + pos, OUTPUT_BUFFER_SIZE - pos,
-                   "%zu:%.*s\n",
-                   results->matches[i].offset,
-                   results->matches[i].len,
-                   (const char *)results->matches[i].match);
+      n = snprintf(prefix, sizeof(prefix), "%zu:",
+                   results->matches[i].offset);
     }
     if (n < 0) continue;
-    pos += (size_t)n;
-
-    if (pos > OUTPUT_BUFFER_SIZE - 128) {
-      if (use_console_api) {
-        flush_buffer(output_buffer, pos);
-      } else {
-        const ssize_t written = write(fd, output_buffer, pos);
-        if (unlikely(written < 0)) {
-          perror("write");
-          ABORT("write");
-        }
-      }
-      pos = 0;
-    }
+    emit_output(output_buffer, &pos, prefix, (size_t)n, fd, use_console_api);
+    emit_output(output_buffer, &pos, results->matches[i].match,
+                results->matches[i].len, fd, use_console_api);
+    emit_output(output_buffer, &pos, "\n", 1, fd, use_console_api);
   }
 
-  if (pos > 0) {
-    if (use_console_api) {
-      flush_buffer(output_buffer, pos);
-    } else {
-      const ssize_t written = write(fd, output_buffer, pos);
-      if (unlikely(written < 0)) {
-        perror("write");
-        ABORT("write");
-      }
-    }
-  }
+  flush_output(output_buffer, &pos, fd, use_console_api);
 
   free(output_buffer);
 }
@@ -518,11 +530,23 @@ int main(const int argc, char *argv[]) {
       if (stats) {
         pattern_store_stats = *stats;
       }
-      omega_list_matcher_compiler_destroy(compiler);
+      if (omega_list_matcher_compiler_destroy(compiler) != 0) {
+        fprintf(stderr, "Error: Failed to finalize compiled output '%s'.\n",
+                arg1);
+        remove(arg1);
+        free(new_argv);
+        return EXIT_FAILURE;
+      }
     } else {
-      omega_list_matcher_compile_patterns_filename(
-          arg1, arg2, ignore_case, ignore_punctuation, elide_whitespace,
-          &pattern_store_stats);
+      if (omega_list_matcher_compile_patterns_filename(
+              arg1, arg2, ignore_case, ignore_punctuation, elide_whitespace,
+              &pattern_store_stats) != 0) {
+        fprintf(stderr, "Error: Failed to compile patterns from '%s' to '%s'.\n",
+                arg2, arg1);
+        remove(arg1); // drop any partial output
+        free(new_argv);
+        return EXIT_FAILURE;
+      }
     }
     if (verbose) {
       print_pattern_store_stats(&pattern_store_stats, stderr);
@@ -535,14 +559,14 @@ int main(const int argc, char *argv[]) {
     omega_list_matcher_t *matcher =
         omega_list_matcher_create(arg1, ignore_case, ignore_punctuation,
                                   elide_whitespace, &pattern_store_stats);
-    if (verbose) {
-      omega_list_matcher_emit_header_info(matcher, stderr);
-    }
     // Check if matcher creation was successful
     if (!matcher) {
       fprintf(stderr, "Error: Failed to create matcher from '%s'.\n", arg1);
       free(new_argv);
       return EXIT_FAILURE;
+    }
+    if (verbose) {
+      omega_list_matcher_emit_header_info(matcher, stderr);
     }
     // Print the pattern store statistics
     if (verbose && pattern_store_stats.stored_pattern_count > 0) {

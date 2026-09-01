@@ -8,9 +8,10 @@
 #define TRANSFORM_ELIDE_SPACE (-2)
 
 typedef struct {
-  int16_t table[256]; // transform table
-  uint8_t *buffer;    // transformation buffer
-  uint32_t capacity;  // capacity of buffer
+  int16_t table[256];   // transform table
+  uint8_t *buffer;      // transformation buffer
+  uint32_t capacity;    // capacity of buffer
+  int elide_whitespace; // non-zero if whitespace elision is enabled
 } transform_table_t;
 
 int transform_init(transform_table_t *pt, int case_insensitive,

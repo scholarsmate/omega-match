@@ -1147,7 +1147,11 @@ class Matcher:
         if not isinstance(haystack, (bytes, bytearray)):
             raise TypeError("haystack must be bytes or bytearray")
         lib = _get_library()
-        buf = ffi.new("uint8_t[]", haystack)
+        if not haystack:
+            return []
+        # Zero-copy view of the haystack; the C side only reads from it and
+        # `buf` keeps the underlying Python buffer alive for the call.
+        buf = ffi.from_buffer("uint8_t[]", haystack)
         res = lib.omega_list_matcher_match(
             self._matcher,
             buf,
@@ -1163,15 +1167,22 @@ class Matcher:
         if res == ffi.NULL:
             return []
 
-        out: List[MatchResult] = []
-        for i in range(res.count):
-            m = res.matches[i]
-            out.append(
-                MatchResult(offset=m.offset, match=bytes(ffi.buffer(m.match, m.len)),
-                            key=int(m.key))
-            )
-        lib.omega_match_results_destroy(res)
-        return out
+        try:
+            # Match pointers refer into the haystack, so slice the match bytes
+            # from the Python object instead of building a per-match ffi.buffer.
+            hay = haystack if isinstance(haystack, bytes) else bytes(haystack)
+            matches = res.matches
+            out: List[MatchResult] = []
+            for i in range(res.count):
+                m = matches[i]
+                offset = m.offset
+                out.append(
+                    MatchResult(offset=offset, match=hay[offset:offset + m.len],
+                                key=m.key)
+                )
+            return out
+        finally:
+            lib.omega_match_results_destroy(res)
 
     def get_match_stats(self) -> MatchStats:
         ms = self._match_stats
@@ -1384,7 +1395,9 @@ class BuiltinReactor:
         line_start: Literal[True, False] = False,
         line_end: Literal[True, False] = False,
     ):
-        buf = ffi.new("uint8_t[]", haystack)
+        # Zero-copy view of the haystack; the C side only reads from it (a
+        # NULL haystack with size 0 is explicitly allowed by the C API).
+        buf = ffi.from_buffer("uint8_t[]", haystack) if haystack else ffi.NULL
         plan = self._lib.omega_builtin_reactor_plan(
             self._reactor,
             matcher._matcher,
@@ -1793,7 +1806,9 @@ class NativePluginReactor:
             raise RuntimeError("Matcher has been destroyed")
         if getattr(self, "_reactor", ffi.NULL) == ffi.NULL:
             raise RuntimeError("NativePluginReactor has been destroyed")
-        buf = ffi.new("uint8_t[]", haystack)
+        # Zero-copy view of the haystack; the C side only reads from it (a
+        # NULL haystack with size 0 is explicitly allowed by the C API).
+        buf = ffi.from_buffer("uint8_t[]", haystack) if haystack else ffi.NULL
         plan = self._lib.omega_native_reactor_plan(
             self._reactor,
             matcher._matcher,

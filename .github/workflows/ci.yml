@@ -26,14 +26,14 @@ jobs:
           - os: windows-latest
             arch: x64
             build_type: Release
-            generator: "Visual Studio 17 2022"
+            generator: "Visual Studio 18 2026"
             cmake_args: ""
             name: "Windows-MSVC"
           # Windows (MSVC PGO)
           - os: windows-latest
             arch: x64
             build_type: Release
-            generator: "Visual Studio 17 2022"
+            generator: "Visual Studio 18 2026"
             cmake_args: ""
             name: "Windows-MSVC-PGO"
             pgo: true
@@ -164,7 +164,7 @@ jobs:
         else
           if [ "${{ matrix.pgo }}" = "true" ]; then
             # Run unified MSVC PGO workflow
-            python scripts/pgo_workflow.py --compiler msvc
+            OMEGA_MATCH_MSVC_GENERATOR="${{ matrix.generator }}" python scripts/pgo_workflow.py --compiler msvc
           else
             cmake --build build --config ${{ matrix.build_type }}
           fi

@@ -158,7 +158,7 @@ def copy_pgort_dll_to_output(build_dir: Path) -> None:
     # Also try common install locations
     program_files = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
     vs_base = Path(program_files) / "Microsoft Visual Studio"
-    for year in ["2022", "2019", "2017"]:
+    for year in ["2026", "2022", "2019", "2017"]:
         for edition in ["Enterprise", "Professional", "Community", "BuildTools"]:
             candidate = vs_base / year / edition / "VC" / "Tools" / "MSVC"
             if candidate.exists():
@@ -183,11 +183,43 @@ def configure_and_build(
     """Configure and build using the given preset."""
     print(f"\n=== Configuring {preset_name} ===")
 
-    config_cmd = ["cmake", "--preset", preset_name]
-
-    # Add Python executable for cross-platform compatibility and require OpenMP for perf builds
     python_exe = sys.executable
-    config_cmd.extend([f"-DPython3_EXECUTABLE={python_exe}", "-DOMEGA_MATCH_REQUIRE_OPENMP=ON"])
+    generator_override = None
+    build_dir = None
+    if platform_name == "windows" and preset_name.startswith("msvc-pgo-"):
+        generator_override = os.environ.get("OMEGA_MATCH_MSVC_GENERATOR")
+        if generator_override:
+            mode = "GENERATE" if "generate" in preset_name else "USE"
+            build_dir = project_root / f"build-{preset_name}"
+            config_cmd = [
+                "cmake",
+                "-B",
+                str(build_dir),
+                "-G",
+                generator_override,
+                "-A",
+                "x64",
+                "-DCMAKE_BUILD_TYPE=Release",
+                f"-DENABLE_PGO_{mode}=ON",
+                f"-DPython3_EXECUTABLE={python_exe}",
+                "-DOMEGA_MATCH_REQUIRE_OPENMP=ON",
+            ]
+        else:
+            config_cmd = ["cmake", "--preset", preset_name]
+            config_cmd.extend(
+                [
+                    f"-DPython3_EXECUTABLE={python_exe}",
+                    "-DOMEGA_MATCH_REQUIRE_OPENMP=ON",
+                ]
+            )
+    else:
+        config_cmd = ["cmake", "--preset", preset_name]
+        config_cmd.extend(
+            [
+                f"-DPython3_EXECUTABLE={python_exe}",
+                "-DOMEGA_MATCH_REQUIRE_OPENMP=ON",
+            ]
+        )
 
     # On macOS runners, hint libomp paths if available
     if platform_name == "macos":
@@ -204,16 +236,21 @@ def configure_and_build(
 
     if platform_name == "windows" and "msvc" in preset_name:
         # MSVC builds need configuration specification
-        run_command(
-            ["cmake", "--build", "--preset", preset_name, "--config", "Release"],
-            cwd=project_root,
-        )
+        if generator_override and build_dir:
+            run_command(
+                ["cmake", "--build", str(build_dir), "--config", "Release"],
+                cwd=project_root,
+            )
+        else:
+            run_command(
+                ["cmake", "--build", "--preset", preset_name, "--config", "Release"],
+                cwd=project_root,
+            )
         # Ensure pgort140.dll is present after build
-        build_dir = (
+        copy_pgort_dll_to_output(
             project_root
             / f"build-msvc-pgo-{'generate' if 'generate' in preset_name else 'use'}"
         )
-        copy_pgort_dll_to_output(build_dir)
     else:
         run_command(["cmake", "--build", "--preset", preset_name], cwd=project_root)
 

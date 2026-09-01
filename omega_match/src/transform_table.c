@@ -16,6 +16,8 @@ int transform_init(transform_table_t *restrict pt, const int case_insensitive,
     ABORT("transform_init: invalid arguments");
   }
 
+  pt->elide_whitespace = elide_whitespace ? 1 : 0;
+
   for (int i = 0; i < 256; ++i) {
     if (elide_whitespace && IS_SPACE(i)) {
       pt->table[i] = TRANSFORM_ELIDE_SPACE;
@@ -78,8 +80,10 @@ const uint8_t *transform_apply(transform_table_t *restrict pt,
     in_space = 0;
   }
 
-  // Trim trailing space if the last character is ' '
-  if (j > 0 && pt->buffer[j - 1] == ' ') {
+  // In elide mode a trailing whitespace run normalizes to a single ' ' that
+  // carries no matchable content, so trim it. A literal trailing space is
+  // significant for case-only transforms and must be preserved.
+  if (pt->elide_whitespace && j > 0 && pt->buffer[j - 1] == ' ') {
     --j;
   }
 

@@ -42,7 +42,11 @@ static int compare_action_refs_desc(const void *a, const void *b) {
   if (r1->end != r2->end) {
     return (r1->end < r2->end) - (r1->end > r2->end);
   }
-  return (r1->order > r2->order) - (r1->order < r2->order);
+  // Descending order tiebreak: both apply paths replay the descending-offset
+  // op list such that, of two same-position inserts, the one applied later
+  // ends up first in the output — so the earlier-emitted action must sort
+  // later for emission order to be preserved in the output.
+  return (r1->order < r2->order) - (r1->order > r2->order);
 }
 
 static void sort_action_refs(action_ref_t *refs, size_t count,
@@ -317,107 +321,109 @@ omega_rewrite_script_get_ops(const omega_rewrite_script_t *restrict script) {
   return script ? script->ops : NULL;
 }
 
-static int ensure_capacity(uint8_t **buffer, size_t *capacity, size_t needed) {
-  size_t new_cap;
-  uint8_t *new_buf;
-  if (needed <= *capacity) {
-    return 0;
-  }
-  new_cap = *capacity ? *capacity : 1;
-  while (new_cap < needed) {
-    if (new_cap > (SIZE_MAX >> 1)) {
-      new_cap = needed;
-      break;
-    }
-    new_cap <<= 1;
-  }
-  new_buf = (uint8_t *)realloc(*buffer, new_cap);
-  if (!new_buf) {
-    return -1;
-  }
-  *buffer = new_buf;
-  *capacity = new_cap;
-  return 0;
-}
-
-static int range_exceeds_size(size_t offset, size_t length, size_t size) {
-  return offset > size || length > size - offset;
-}
-
 int omega_rewrite_script_apply_bytes(
     const omega_rewrite_script_t *restrict script,
     const uint8_t *restrict input, size_t input_len, uint8_t **restrict output,
     size_t *restrict output_len) {
   uint8_t *buffer;
-  size_t capacity;
-  size_t size;
+  size_t out_size;
+  size_t cursor;
+  size_t write_pos;
   size_t i;
 
   if (!script || !output || !output_len || (!input && input_len != 0)) {
     return -1;
   }
 
-  capacity = input_len ? input_len : 1;
-  buffer = (uint8_t *)malloc(capacity);
+  // Ops are stored in descending offset order over non-overlapping input
+  // spans, so walking them in reverse yields a single ascending pass that
+  // stitches the output together in O(input + output) instead of one tail
+  // memmove per op.
+  //
+  // First pass: validate the ops and compute the exact output size.
+  out_size = 0;
+  cursor = 0;
+  for (i = script->op_count; i-- > 0;) {
+    const omega_rewrite_script_op_t *op = &script->ops[i];
+    if (op->offset < cursor || op->offset > input_len) {
+      return -1;
+    }
+    if (op->offset - cursor > SIZE_MAX - out_size) {
+      return -1;
+    }
+    out_size += op->offset - cursor;
+    cursor = op->offset;
+    switch (op->kind) {
+    case OMEGA_REWRITE_SCRIPT_OVERWRITE:
+      if (op->data_len != op->length || op->length > input_len - cursor ||
+          op->length > SIZE_MAX - out_size) {
+        return -1;
+      }
+      out_size += op->length;
+      cursor += op->length;
+      break;
+    case OMEGA_REWRITE_SCRIPT_DELETE:
+      if (op->length > input_len - cursor) {
+        return -1;
+      }
+      cursor += op->length;
+      break;
+    case OMEGA_REWRITE_SCRIPT_INSERT:
+      if (op->data_len > SIZE_MAX - out_size) {
+        return -1;
+      }
+      out_size += op->data_len;
+      break;
+    default:
+      return -1;
+    }
+  }
+  if (input_len - cursor > SIZE_MAX - out_size) {
+    return -1;
+  }
+  out_size += input_len - cursor;
+
+  buffer = (uint8_t *)malloc(out_size ? out_size : 1);
   if (!buffer) {
     return -1;
   }
-  if (input_len > 0) {
-    memcpy(buffer, input, input_len);
-  }
-  size = input_len;
 
-  for (i = 0; i < script->op_count; ++i) {
+  // Second pass: copy the untouched gaps and the op payloads in order.
+  cursor = 0;
+  write_pos = 0;
+  for (i = script->op_count; i-- > 0;) {
     const omega_rewrite_script_op_t *op = &script->ops[i];
-    if (op->offset > size) {
-      free(buffer);
-      return -1;
+    const size_t gap = op->offset - cursor;
+    if (gap > 0) {
+      memcpy(buffer + write_pos, input + cursor, gap);
+      write_pos += gap;
+      cursor = op->offset;
     }
     switch (op->kind) {
     case OMEGA_REWRITE_SCRIPT_OVERWRITE:
-      if (op->data_len != op->length ||
-          range_exceeds_size(op->offset, op->length, size)) {
-        free(buffer);
-        return -1;
-      }
       if (op->length > 0) {
-        memcpy(buffer + op->offset, op->data, op->length);
+        memcpy(buffer + write_pos, op->data, op->length);
+        write_pos += op->length;
       }
+      cursor += op->length;
       break;
     case OMEGA_REWRITE_SCRIPT_DELETE:
-      if (range_exceeds_size(op->offset, op->length, size)) {
-        free(buffer);
-        return -1;
-      }
-      if (op->length > 0 && op->offset + op->length < size) {
-        memmove(buffer + op->offset, buffer + op->offset + op->length,
-                size - (op->offset + op->length));
-      }
-      size -= op->length;
+      cursor += op->length;
       break;
-    case OMEGA_REWRITE_SCRIPT_INSERT:
-      if (op->data_len > SIZE_MAX - size ||
-          ensure_capacity(&buffer, &capacity, size + op->data_len) != 0) {
-        free(buffer);
-        return -1;
-      }
-      if (op->offset < size) {
-        memmove(buffer + op->offset + op->data_len, buffer + op->offset,
-                size - op->offset);
-      }
+    default: // OMEGA_REWRITE_SCRIPT_INSERT
       if (op->data_len > 0) {
-        memcpy(buffer + op->offset, op->data, op->data_len);
+        memcpy(buffer + write_pos, op->data, op->data_len);
+        write_pos += op->data_len;
       }
-      size += op->data_len;
       break;
-    default:
-      free(buffer);
-      return -1;
     }
+  }
+  if (cursor < input_len) {
+    memcpy(buffer + write_pos, input + cursor, input_len - cursor);
   }
 
   *output = buffer;
-  *output_len = size;
+  *output_len = out_size;
   return 0;
 }
 

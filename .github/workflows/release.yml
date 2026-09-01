@@ -27,12 +27,12 @@ jobs:
           - os: windows-latest
             arch: x64
             build_type: Release
-            generator: "Visual Studio 17 2022"
+            generator: "Visual Studio 18 2026"
             name: "Windows-MSVC"
           - os: windows-latest
             arch: x64
             build_type: Release
-            generator: "Visual Studio 17 2022"
+            generator: "Visual Studio 18 2026"
             name: "Windows-MSVC-PGO"
             pgo: true
           - os: ubuntu-latest
@@ -126,7 +126,8 @@ jobs:
           cmake --preset macos-release -DPython3_EXECUTABLE=$(which python) -DOMEGA_MATCH_REQUIRE_OPENMP=ON
         else
           if [ "${{ matrix.pgo }}" = "true" ]; then
-            cmake --preset msvc-pgo-generate -DPython3_EXECUTABLE=$(which python)
+            # PGO configuration will be handled by the PGO workflow script
+            echo "PGO build - configuration handled by pgo_workflow.py"
           else
             cmake -B build -G "${{ matrix.generator }}" -A x64 -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DPython3_EXECUTABLE=$(which python) -DOMEGA_MATCH_REQUIRE_OPENMP=ON
           fi
@@ -149,7 +150,7 @@ jobs:
         else
           if [ "${{ matrix.pgo }}" = "true" ]; then
             # Run unified MSVC PGO workflow
-            python scripts/pgo_workflow.py --compiler msvc
+            OMEGA_MATCH_MSVC_GENERATOR="${{ matrix.generator }}" python scripts/pgo_workflow.py --compiler msvc
           else
             cmake --build build --config ${{ matrix.build_type }}
           fi
