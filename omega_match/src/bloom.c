@@ -43,6 +43,14 @@ void bloom_filter_write(const bloom_filter_t *restrict bf, FILE *restrict fp) {
   // Write the bit size
   fwrite(&bf->bit_size, sizeof(bf->bit_size), 1, fp);
 
+  // Version 4 compiled files keep the uint64_t bit array naturally aligned.
+  // The compiled header and pattern store both end on an 8-byte boundary, so
+  // this reserved word moves the array from offset 4 mod 8 to offset 0 mod 8.
+  // Older readers reject newer format versions; the v4 reader still handles
+  // the historical v1-v3 layout without this word.
+  const uint32_t reserved = 0;
+  fwrite(&reserved, sizeof(reserved), 1, fp);
+
   // Write the bit array itself
   fwrite(bf->bits, sizeof(uint64_t), bf->bit_size >> 6, fp);
 }
@@ -64,35 +72,25 @@ void bloom_filter_add(const bloom_filter_t *restrict bf, const uint32_t key) {
 
 int bloom_filter_query(const bloom_filter_t *restrict bf, const uint32_t key) {
   const uint32_t h1 = fast_gram_hash(key);
-  const uint32_t h2 = key * 0x9e3779b1U; // GOLDEN_RATIO_32
   const uint32_t mask = bf->bit_size - 1;
-
-  const uint32_t bitpos0 = (h1 + 0 * h2) & mask;
-  const uint32_t bitpos1 = (h1 + 1 * h2) & mask;
-  const uint32_t bitpos2 = (h1 + 2 * h2) & mask;
-
-  const uint32_t word0 = bitpos0 >> 6;
-  const uint32_t word1 = bitpos1 >> 6;
-  const uint32_t word2 = bitpos2 >> 6;
-
-  const uint64_t m0 = 1ULL << (bitpos0 & 63);
-  const uint64_t m1 = 1ULL << (bitpos1 & 63);
-  const uint64_t m2 = 1ULL << (bitpos2 & 63);
-
   const uint64_t *restrict bits = bf->bits;
 
-  // Prefetch next likely words to hide latency on large tables.
-  // Safe, best-effort hint; cross-platform via OLM_PREFETCH.
-  OLM_PREFETCH(bits + word0);
-  OLM_PREFETCH(bits + word1);
-  OLM_PREFETCH(bits + word2);
+  // Test the sparse filter one bit at a time. Most candidate grams fail the
+  // first bit, so eagerly calculating and loading all three random words adds
+  // two unnecessary cache accesses to the overwhelmingly common miss path.
+  uint32_t bit_pos = h1 & mask;
+  if ((bits[bit_pos >> 6] & (1ULL << (bit_pos & 63))) == 0) {
+    return 0;
+  }
 
-  // Load and test; combine loads if multiple positions share the same word.
-  const uint64_t w0 = bits[word0];
-  const uint64_t w1 = (word1 == word0) ? w0 : bits[word1];
-  const uint64_t w2 = (word2 == word0) ? w0 : (word2 == word1) ? w1 : bits[word2];
+  const uint32_t h2 = key * 0x9e3779b1U; // GOLDEN_RATIO_32
+  bit_pos = (bit_pos + (h2 & mask)) & mask;
+  if ((bits[bit_pos >> 6] & (1ULL << (bit_pos & 63))) == 0) {
+    return 0;
+  }
 
-  return ((w0 & m0) && (w1 & m1) && (w2 & m2));
+  bit_pos = (bit_pos + (h2 & mask)) & mask;
+  return (bits[bit_pos >> 6] & (1ULL << (bit_pos & 63))) != 0;
 }
 
 // Destroy bloom filter and free resources

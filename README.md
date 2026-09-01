@@ -116,267 +116,66 @@ cpack -G WIX --config build-msvc-release/CPackConfig.cmake
 
 ## Performance Testing
 
-OmegaMatch includes a comprehensive performance testing suite (`perf_test.py`) that benchmarks the library against grep-like tools when available. The test suite provides detailed performance metrics and correctness validation across multiple matching scenarios.
-
-Note: When running with `--no-grep`, the harness adds `--quiet` to matcher runs to suppress result printing and avoid IO/formatting overhead. This does not change the work performed by the matcher and only affects console output, yielding more stable measurements.
-
-### Running Performance Tests
-
-```sh
-# Run all tests with status messages
-python perf_test.py --show-status
-
-# Run specific tests only
-python perf_test.py --tests baseline,ignore-case,word-boundary --show-status
-
-# Run without grep comparisons (useful on systems without grep)
-python perf_test.py --no-grep --show-status
-
-# List all available tests
-python perf_test.py --tests list
-```
-
-### Test Results Overview
-
-The performance test suite benchmarks many different matching scenarios with grep comparison where possible:
+Use `scripts/benchmark_scaling.py` for comparative or scaling claims. It
+generates exact-size corpora on a caller-selected filesystem, precompiles the
+OmegaMatch pattern store, drains complete output from every tool, verifies
+byte counts and SHA-256 digests, and records raw samples in CSV and JSON. GNU
+grep and ripgrep are both included when installed.
 
 ```sh
-PS D:\GitHub\omega-match> python3.exe .\perf_test.py --show-status
-[INFO] Running all 21 tests
-[INFO] Debug binary: ./build-msvc-debug/Debug/olm.exe
-[INFO] Release binary: ./build-msvc-release/Release/olm.exe
-[INFO] Using `bash-grep` for grep comparisons
-[INFO] Status messages enabled
-[INFO] Status messages enabled
-
-Test Case                                                | Debug MB/s   | Release MB/s | Grep MB/s    | Ratio    | Compare   
-----------------------------------------------------------------------------------------------------------------------------
-baseline                                                 | 4262.54      | 7992.79      | N/A          | N/A      | N/A       
-ignore-case                                              | 999.67       | 2360.44      | N/A          | N/A      | N/A       
-ignore-case+ignore-punct                                 | 1024.10      | 2505.49      | N/A          | N/A      | N/A       
-ignore-case+ignore-punct+word-boundary                   | 3724.81      | 7920.60      | N/A          | N/A      | N/A       
-ignore-case+ignore-punct+word-boundary+elide-whitespace  | 3610.58      | 7235.59      | N/A          | N/A      | N/A       
-ignore-case+no-overlap+longest                           | 1415.09      | 3004.38      | 210.29       | 14.29x   | OK        
-ignore-case+word-boundary                                | 4096.64      | 8924.43      | 159.52       | 55.95x   | OK        
-ignore-punct                                             | 3052.42      | 5951.75      | N/A          | N/A      | N/A       
-line-end                                                 | 4872.53      | 9001.35      | 202.84       | 44.38x   | OK        
-line-end+ignore-case                                     | 3960.01      | 6336.87      | 12.49        | 507.36x  | OK      
-line-end+word-boundary                                   | 6579.95      | 11171.08     | 123.27       | 90.62x   | OK      
-line-start                                               | 4063.12      | 8557.74      | 118.76       | 72.06x   | OK      
-line-start+ignore-case                                   | 3418.66      | 6281.00      | 111.12       | 56.52x   | OK      
-line-start+line-end                                      | 4793.94      | 7988.92      | 102.85       | 77.68x   | OK      
-line-start+line-end+word-boundary                        | 6493.66      | 11275.96     | 98.32        | 114.69x  | OK      
-longest+no-overlap                                       | 3845.69      | 7578.93      | 8696.32      | 0.87x    | OK      
-longest+no-overlap+word-boundary                         | 6119.62      | 10660.46     | 9420.41      | 1.13x    | OK      
-no-overlap+word-boundary                                 | 6504.39      | 9852.67      | N/A          | N/A      | N/A     
-word-boundary                                            | 6071.29      | 9641.10      | N/A          | N/A      | N/A     
-word-prefix                                              | 3499.79      | 6377.13      | N/A          | N/A      | N/A     
-word-suffix                                              | 3906.00      | 7703.24      | N/A          | N/A      | N/A     
-----------------------------------------------------------------------------------------------------------------------------
-[INFO] Performance test completed. Results saved to ./perf_results.csv.
+python3 scripts/benchmark_scaling.py \
+  --olm release=build-gcc-release/olm \
+  --olm pgo=build-gcc-pgo-use/olm \
+  --sizes-mib 4,16,64,256 \
+  --cases longest-no-overlap,line-start,line-end \
+  --threads 8 --runs 5 --work-dir /tmp/omega-match-scaling
 ```
 
-### Latest Linux (WSL2 AlmaLinux 10, GCC 14.2.1) Snapshot – Aug 2025
+The checked-in `data/names.txt` contains 29,156 patterns. On an Intel Core
+Ultra 7 165H under Ubuntu 24.04/WSL2, the September 2026 PGO build produced
+the following medians over a warm 256 MiB KJV-derived corpus on the native
+Linux filesystem. These are output-equivalent CLI measurements: every tool's
+complete output was consumed at every size, and byte counts plus SHA-256
+digests matched on the 4 MiB validation corpus.
 
-Environment:
+| Mode | OmegaMatch PGO | GNU grep 3.11 | ripgrep 15.2 |
+|---|---:|---:|---:|
+| longest + no-overlap | 266 MiB/s | 196 MiB/s | 129 MiB/s |
+| line start | 1,018 MiB/s | 24 MiB/s | 252 MiB/s |
+| line end | 606 MiB/s | 27 MiB/s | 51 MiB/s |
 
-| Item | Value |
-|------|-------|
-| OS | AlmaLinux 10 (WSL2) |
-| CPU | Intel Core Ultra 7 165H (22 HW threads reported) |
-| Compiler | GCC 14.2.1 |
-| OpenMP threads | 8 |
-| PGO Training | `scripts/pgo_workflow.py --compiler gcc` (all 40 workloads succeeded) |
+OmegaMatch used eight OpenMP threads. GNU grep is single-threaded; ripgrep was
+given `-j 8`, although a single input file does not necessarily use all eight
+workers. OmegaMatch's persisted pattern store was compiled before timing,
+while grep and ripgrep rebuild their pattern engines on each invocation. That
+is representative of OmegaMatch's intended match-many deployment model, but
+it is not a scan-kernel-only comparison. Regex construction dominates much of
+the anchored comparator time, and the line-end case has no matches in this
+corpus. The output sizes at 256 MiB were 60.9 MB, 16.4 MB, and 0 bytes for the
+three rows respectively.
 
-Key throughput (MB/s) for selected scenarios (higher is better):
+For `longest + no-overlap`, OmegaMatch PGO rose from 154 MiB/s at 4 MiB to
+224, 274, and 266 MiB/s at 16, 64, and 256 MiB respectively; it did not
+progressively degrade with input size. Results depend on CPU, tool versions,
+pattern distribution, match density, storage, cache state, thread count, and
+whether output is materialized. Treat this snapshot as a reproducible data
+point, not a universal throughput guarantee. See
+[DEVELOPMENT.md](DEVELOPMENT.md#performance-testing) for methodology,
+output-suppressed thread and pattern-count scaling, profiling results, and
+known pitfalls.
 
-| Test Case | Debug | Release | Release+PGO | Δ PGO vs Release |
-|-----------|-------|---------|-------------|------------------|
-| baseline | 10,338 | 15,286 | 18,003 | +17.8% |
-| ignore-case+no-overlap+longest | 4,488 | 7,584 | 8,182 | +7.9% |
-| line-end | 12,228 | 23,389 | 23,411 | ~0% |
-| line-end+ignore-case | 7,870 | 14,923 | 16,546 | +10.9% |
-| line-start+line-end | 11,475 | 21,722 | 20,740 | -4.5% (minor variance) |
-| longest+no-overlap | 10,306 | 19,962 | 20,206 | +1.2% |
-| longest+no-overlap+word-boundary | 9,170 | 18,506 | 19,204 | +3.8% |
-
-Observations:
-* PGO provided consistent gains (5–18%) on many mixed-flag workloads (especially heavy transformation / filtering cases) while some anchor-heavy paths were already near peak.
-* A small regression (line-start+line-end) is within expected run-to-run variance; re-training with workload emphasis on dual-anchor cases can mitigate if persistent.f
-* Grep-comparable ratios (e.g. line-end variants 90x–235x+) exceed earlier Windows Git Bash examples due to different normalization and environment.
-
-Note: Throughput values are normalized by the harness constant (1GB logical size) for comparability across runs; actual on-disk `data/kjv.txt` size is smaller. To benchmark with a synthetic 1GB haystack, delete or rename `data/kjv.txt` so the generator path creates a large file, or adjust `HAYSTACK_SIZE_MB` in `perf_test.py` to match the real haystack size.
-
-Reproduce:
-```bash
-cmake --preset debug && cmake --build --preset debug
-cmake --preset release && cmake --build --preset release
-python3 scripts/pgo_workflow.py --compiler gcc
-python3 perf_test.py --show-status
-python3 scripts/plot_perf.py   # generates images/perf_results_log.png (fallback plotter if gnuplot unavailable)
-```
-
-These results will be updated as further optimizations land.
-
-![Current Performance Plot (Log Scale)](images/perf_results_log.png)
-
-### Understanding the Results
-
-**Columns:**
-- **Test Case**: The matching scenario being tested
-- **Debug MB/s**: Throughput using debug build (MB/s)
-- **Release MB/s**: Throughput using release build (MB/s)  
-- **Grep MB/s**: Throughput using grep/grep-like tool (MB/s)
-- **Ratio**: Performance ratio (Release OLM ÷ Grep)
-- **Compare**: Correctness validation (`OK` means identical results)
-
-**Performance Ratio Interpretation:**
-- **1.0x**: Equivalent performance
-- **>1.0x**: OmegaMatch is faster (e.g., `15.48x` = 15× faster)
-- **<1.0x**: Grep is faster (e.g., `0.82x` = grep is 1.2× faster)
-
-### Test Data
-
-The performance tests use realistic datasets:
-- **Patterns**: `data/names.txt` (given name list, ~2,000 patterns)
-- **Haystack**: `data/kjv.txt` (King James Bible, ~4MB text)
-- **Workload**: Multi-threaded pattern matching with various options
-
-### Targeted Testing
-
-Run specific test categories:
-
-```sh
-# Test basic string matching performance
-python perf_test.py --tests baseline,ignore-case,word-boundary
-
-# Test line anchor performance (OmegaMatch's strength)
-python perf_test.py --tests line-start,line-end,line-start+line-end
-
-# Test word boundary variations
-python perf_test.py --tests word-boundary,longest+word-boundary,no-overlap+word-boundary
-
-# Test advanced combinations
-python perf_test.py --tests ignore-case+word-boundary,longest+no-overlap+word-boundary
-```
-
-### Cross-Platform Testing
-
-The test suite works across platforms:
-- **Windows**: Uses `bash-grep` (Git Bash) or PowerShell-based grep
-- **Linux**: Uses native `grep` command
-- **macOS**: Uses BSD `grep` command
-- **No grep**: Gracefully falls back to OmegaMatch-only benchmarking
-
-Results are saved to `perf_results.csv` for further analysis and plotting.
-
-## A/B performance testing (branches or binaries)
-
-Use this repeatable workflow to compare performance between two builds (e.g., main vs a perf branch) on the same machine. It generates CSVs for each build and prints a side-by-side summary with ratios.
-
-### Windows (PowerShell)
-
-Assumptions:
-- Build 1 (PERF branch): `build-msvc-release\\Release\\olm.exe`
-- Build 2 (MAIN branch): `build-msvc-release-2\\Release\\olm.exe`
-
-Run a consistent subset of tests without grep for low noise, and let the harness auto-gate `--quiet` if supported:
-
-```powershell
-# From repo root
-$perf = "$(Get-Location)\build-msvc-release\Release\olm.exe"
-$main = "$(Get-Location)\build-msvc-release-2\Release\olm.exe"
-$tests = "baseline,ignore-case,ignore-case+word-boundary,longest+no-overlap,line-start+line-end,line-start+line-end+word-boundary"
-
-Write-Host "Benchmarking PERF..."
-python perf_test.py --no-grep --no-debug --release-binary $perf --tests $tests --show-status
-Copy-Item perf_results.csv perf_perf.csv -Force
-
-Write-Host "Benchmarking MAIN..."
-python perf_test.py --no-grep --no-debug --release-binary $main --tests $tests --show-status
-Copy-Item perf_results.csv perf_main.csv -Force
-
-# Compare CSVs (prints MAIN vs PERF with ratios)
-python .\scripts\compare_branches.py perf_main.csv perf_perf.csv
-```
-
-Tips:
-- Rerun specific variants a few times if you see outliers to check variance:
-
-```powershell
-1..3 | ForEach-Object {
-    python perf_test.py --no-grep --no-debug --release-binary $perf --tests line-start+line-end+word-boundary
-    python perf_test.py --no-grep --no-debug --release-binary $main --tests line-start+line-end+word-boundary
-}
-```
-
-### Linux / WSL (bash)
-
-```bash
-# From repo root (adjust binary paths as needed)
-perf=./build-gcc-release/olm
-main=../omega-match-main/build-gcc-release/olm
-
-python3 perf_test.py --no-grep --no-debug --release-binary "$perf" \
-    --tests baseline,ignore-case,ignore-case+word-boundary,longest+no-overlap,line-start+line-end,line-start+line-end+word-boundary
-cp perf_results.csv perf_perf.csv
-
-python3 perf_test.py --no-grep --no-debug --release-binary "$main" \
-    --tests baseline,ignore-case,ignore-case+word-boundary,longest+no-overlap,line-start+line-end,line-start+line-end+word-boundary
-cp perf_results.csv perf_main.csv
-
-python3 scripts/compare_branches.py perf_main.csv perf_perf.csv
-```
-
-Notes:
-- The harness saves the latest run to `perf_results.csv`. Copy/rename to keep per-build CSVs.
-- When `--no-grep` is used, the harness will add `--quiet` automatically if the binary supports it (capability-probed via `match --help`).
-- Keep test lists identical across builds and run on an otherwise idle system for best signal.
-- `scripts/compare_branches.py` accepts two CSVs, prints MB/s for each case and the PERF/MAIN ratio.
-
-### Performance Visualization
-
-OmegaMatch includes Gnuplot scripts to create publication-quality performance charts from the test results:
-
-```sh
-# Run performance tests (creates perf_results.csv, used by perf_plot.gp)
-python perf_test.py --show-status
-
-# Generate performance chart (requires gnuplot)
-gnuplot perf_plot.gp
-```
-
-This creates `perf_results.png` with a comprehensive performance comparison chart:
-
-![Performance Chart - Using WSL (Ubuntu 24.04.2 LTS) grep](images/perf_results-wsl.png)
-
-You can also create focused charts for specific test categories:
-
-```sh
-# Create chart for grep-comparable tests only using git bash on a Windows 11 Pro "Dev Drive"
-python.exe perf_test.py --show-status --tests ignore-case+no-overlap+longest,ignore-case+word-boundary,line-end,line-end+ignore-case,line-end+word-boundary,line-start,line-start+ignore-case,line-start+line-end,line-start+line-end+word-boundary,longest+no-overlap,longest+no-overlap+word-boundary
-
-# Run gnuplot in WSL
-gnuplot perf_plot.gp
-```
-
-![Performance Chart - Core Tests](images/perf_results-git_bash.png)
-
-**Chart Features:**
-- **Side-by-side bars** comparing OmegaMatch Release vs Grep performance
-- **Logarithmic scale** to handle wide performance ranges (0.1x to 500x+)
-- **Color coding** to distinguish OmegaMatch (blue) vs Grep (orange) results
-- **Automatic scaling** based on available test data
-- **Publication quality** suitable for papers, presentations, and documentation
-
-**Requirements:**
-- **Gnuplot 5.0+** installed
-- Performance test results in `perf_results.csv`
-- The script automatically handles missing grep data (N/A values)
+`perf_test.py` remains useful as a broad cross-platform smoke benchmark. It
+now uses the physical haystack size as its throughput numerator and drains
+grep output through a pipe. Historical results produced by older revisions
+used a fixed 1 GiB numerator for the 4.39 MiB checked-in file and could let GNU
+grep stop after its first match when output was `/dev/null`; those figures and
+ratios are invalid.
 
 ## Profile Guided Optimization (PGO) Builds
 
-OmegaMatch supports Profile Guided Optimization (PGO) for maximum performance. PGO builds can provide and additional **5-20% better performance** than standard builds by optimizing based on real-world usage patterns.
+OmegaMatch supports Profile Guided Optimization (PGO). Its benefit is
+workload-dependent, so compare it with the same revision's standard release
+build on representative inputs.
 
 ### Quick Start - PGO Builds
 
@@ -386,7 +185,7 @@ Use the unified PGO workflow script for any platform:
 # Linux/WSL - GCC PGO (most stable)
 python3 scripts/pgo_workflow.py --compiler gcc
 
-# Linux/WSL - Clang PGO (often fastest)
+# Linux/WSL - Clang PGO
 python3 scripts/pgo_workflow.py --compiler clang
 
 # Windows - MSVC PGO
@@ -395,42 +194,23 @@ python scripts/pgo_workflow.py --compiler msvc
 
 ### Available PGO Variants
 
-| Variant | Platform | Compiler | Performance Gain | Best For |
-|---------|----------|----------|------------------|----------|
-| `linux-x64-gcc-pgo` | Linux x64 | GCC | +10-15% | Production workloads, stability |
-| `linux-x64-clang-pgo` | Linux x64 | Clang | +15-20% | Maximum performance |
-| `windows-x64-msvc-pgo` | Windows x64 | MSVC | +5-10% | Windows applications |
+| Variant | Platform | Compiler | Expected result |
+|---------|----------|----------|-----------------|
+| `linux-x64-gcc-pgo` | Linux x64 | GCC | Workload-dependent; benchmark against release |
+| `linux-x64-clang-pgo` | Linux x64 | Clang | Workload-dependent; benchmark against GCC and release |
+| `windows-x64-msvc-pgo` | Windows x64 | MSVC | Workload-dependent; benchmark against release |
 
 ### Selecting the Best PGO Variant
 
-Use the selection helper to find the optimal variant for your platform:
+No compiler is universally fastest. Build the applicable variants and compare
+them on representative inputs with the scaling harness:
 
 ```bash
-python scripts/select_pgo_variant.py
-```
-
-Example output:
-```
-🚀 OmegaMatch PGO Variant Selection Guide
-==================================================
-Detected Platform: linux-x64
-
-✅ Compatible Variants:
-1. Standard Linux x64 build (no PGO)
-   Optimization: None
-   Best for: General use, compatibility
-
-2. Linux x64 with GCC Profile Guided Optimization  
-   Optimization: PGO (GCC)
-   Best for: High performance, production workloads
-
-3. Linux x64 with Clang Profile Guided Optimization
-   Optimization: PGO (Clang) 
-   Best for: Maximum performance, modern LLVM optimizations
-
-🎯 Recommendations:
-⚡ Maximum Performance: Linux x64 with Clang Profile Guided Optimization
-🔧 Maximum Compatibility: Standard Linux x64 build (no PGO)
+python3 scripts/benchmark_scaling.py \
+  --olm release=build-gcc-release/olm \
+  --olm gcc-pgo=build-gcc-pgo-use/olm \
+  --sizes-mib 64,256 --runs 5 --skip-grep --skip-ripgrep \
+  --work-dir /tmp/omega-match-pgo-comparison
 ```
 
 ### Manual PGO Build Process
@@ -483,12 +263,11 @@ The automated PGO training includes comprehensive workloads:
 Compare PGO vs standard builds:
 
 ```bash
-# Automated performance comparison
-python scripts/compare_pgo_performance.py
-
-# Manual benchmarking
-python perf_test.py --build-dir build-gcc-release
-python perf_test.py --build-dir build-gcc-pgo-use
+python3 scripts/benchmark_scaling.py \
+  --olm release=build-gcc-release/olm \
+  --olm pgo=build-gcc-pgo-use/olm \
+  --sizes-mib 16,64,256 --runs 5 --skip-grep --skip-ripgrep \
+  --work-dir /tmp/omega-match-pgo-comparison
 ```
 
 ### VS Code Integration
@@ -520,8 +299,11 @@ ls -la data/
 
 **Performance regression:**
 ```bash
-# Check if training matches your workload
-python scripts/compare_pgo_performance.py
+# Compare release and PGO on representative inputs
+python3 scripts/benchmark_scaling.py \
+  --olm release=build-gcc-release/olm \
+  --olm pgo=build-gcc-pgo-use/olm \
+  --sizes-mib 64,256 --runs 5 --skip-grep --skip-ripgrep
 
 # Add custom training workloads to pgo_workflow.py
 ```
@@ -536,7 +318,7 @@ gcc --version
 cmake --version
 ```
 
-For more details, see [PGO CI/CD Integration Guide](PGO_CI_CD_GUIDE.md).
+For more details, see the [cross-platform PGO guide](scripts/README_PGO.md).
 
 ## Usage
 
@@ -603,7 +385,10 @@ omega_list_matcher_destroy(m);
 
 OmegaMatch provides Python bindings with a clean, Pythonic API that wraps the high-performance native C library. The bindings support all major platforms (Linux, macOS, Windows) and Python versions 3.9+.
 
-**🚀 Performance Optimized**: The Python package automatically selects the best available PGO (Profile Guided Optimization) variant for your platform, providing **5-20% better performance** than standard builds without any configuration required.
+The Python package can select an available PGO (Profile Guided Optimization)
+variant for the current platform. PGO can help, have little effect, or regress
+a workload when its training profile is not representative, so benchmark the
+selected native library on production-like data.
 
 ### Installation
 
@@ -919,7 +704,7 @@ OmegaMatch uses a two-tier matching pipeline:
 | Line anchor filters | Built-in | Post-processing | Yes | Post-processing | Post-processing |
 | Longest-only / no-overlap | Built-in (linear time) | Post-processing | Partial | Post-processing | Post-processing |
 | Streaming results | Yes (k-way merge) | Yes (automaton) | Yes | No | No |
-| Short pattern optimization | Yes (bitmap + binary search) | No (uniform trie) | Yes | Poor (short shifts) | Poor (short shifts) |
+| Short pattern optimization | Yes (direct and prefix bitmaps + binary search) | No (uniform trie) | Yes | Poor (short shifts) | Poor (short shifts) |
 | Memory overhead per pattern | Low (hash table) | High (trie nodes + failure links) | Moderate | Moderate (shift tables) | Moderate (shift tables) |
 | Profile-Guided Optimization | Yes (GCC/Clang/MSVC) | No (typically) | No | No | No |
 | Language bindings | C, Python | Many | C, C++, Python | Few | Few |
@@ -937,14 +722,14 @@ OmegaMatch uses a two-tier matching pipeline:
 
 ### Performance Profile
 
-OmegaMatch's hash-based design avoids the pointer-chasing inherent in trie-based matchers (Aho-Corasick) and the shift-table limitations that affect Wu-Manber on short patterns or large pattern sets. On benchmarks against `grep -F` (which typically uses Aho-Corasick internally):
-
-- **Line-anchored + case-insensitive**: up to **507x faster** than grep
-- **Word-boundary matching**: **56--115x faster** than grep
-- **Raw throughput**: 7--20 GB/s on modern hardware (release builds with PGO)
-- **Baseline literal matching**: competitive with grep (~0.87--1.13x), with OmegaMatch's advantage growing as filters are combined
-
-OmegaMatch is strongest when multiple structural filters (word boundaries, line anchors, longest-only, no-overlap) are applied simultaneously -- these are evaluated during the streaming merge at near-zero marginal cost, whereas other tools must apply them as separate post-processing passes.
+OmegaMatch's hash-based design avoids the pointer-chasing inherent in
+trie-based matchers and the short-pattern limitations of shift-table
+algorithms. Performance is workload-dependent: on the reproducible 256 MiB
+snapshot above, PGO OmegaMatch was 1.36x faster than GNU grep and 2.07x faster
+than ripgrep for `longest + no-overlap`, with larger advantages for line
+anchors. Output-suppressed matcher throughput scales with OpenMP threads, but
+formatting and dense match sets can become the limiting cost. Use the scaling
+harness on representative data instead of extrapolating these ratios.
 
 ### What Is Distinctive About OmegaMatch
 
@@ -952,17 +737,26 @@ OmegaMatch does not introduce a new algorithm in the academic sense. Its individ
 
 1. **Hash-based multi-pattern matching instead of automata.** Most multi-pattern matchers descend from Aho-Corasick (trie + failure links). OmegaMatch replaces the automaton with a Bloom filter feeding a SIMD-probed hash table. This trades the automaton's guaranteed single-pass property for better cache locality and lower memory overhead -- a practical win on modern hardware where cache misses dominate.
 
-2. **Two-tier pattern specialization.** Patterns of length 1--4 use dedicated bitmap lookups (O(1) for 1--2 bytes) and binary search (O(log n) for 3--4 bytes), completely bypassing the Bloom filter and hash table. This avoids the performance cliff that shift-table algorithms (Wu-Manber) hit on short patterns and the per-node overhead that tries (Aho-Corasick) pay regardless of pattern length.
+2. **Two-tier pattern specialization.** Patterns of length 1--4 bypass the
+   Bloom filter and hash table. One- and two-byte patterns use direct bitmaps;
+   three- and four-byte patterns use two-byte prefix bitmaps before a keyed
+   binary search.
 
-3. **Compile-once, memory-map, match-many architecture.** The compiled pattern store is a flat binary file that can be memory-mapped and shared across processes with zero deserialization cost. This is uncommon among multi-pattern matchers, which typically require in-process construction of their data structures.
+3. **Compile-once, memory-map, match-many architecture.** The compiled pattern
+   store is a flat binary file whose primary tables can be mapped directly and
+   shared across processes. Matcher setup only builds small derived prefix
+   indexes rather than reconstructing the main table.
 
 4. **Streaming merge with integrated filtering.** Per-thread results are merged via a min-heap ordered by (offset ascending, length descending). Longest-only and no-overlap filters are evaluated *during* the merge in a single linear pass, rather than as a separate post-processing step. This guarantees O(n log t) total merge cost (where t = thread count) with no intermediate materialization.
 
 5. **Rich structural filter vocabulary at the engine level.** Word boundaries, word prefixes/suffixes, line-start/line-end anchors, case folding, punctuation removal, and whitespace elision are all first-class options in the matching engine rather than bolted-on post-filters. This allows the engine to short-circuit early (e.g., skipping non-boundary positions entirely) rather than generating matches and discarding them.
 
-In short, OmegaMatch is a **systems-level contribution** rather than an algorithmic one: a carefully optimized pipeline of known techniques arranged to exploit modern hardware (SIMD, multi-core, memory-mapped I/O) for the specific problem of high-throughput exact multi-pattern matching with structural constraints. None of these components would be new to a college algorithms class -- Bloom filters, hash tables, binary search, min-heaps are all textbook. But the classics were designed in an era where memory was flat and CPUs did one thing at a time. OmegaMatch wins by respecting how modern hardware *actually* works: cache lines, SIMD lanes, multiple cores, and memory-mapped I/O. Aho-Corasick's trie is elegant on paper but brutal on a cache hierarchy -- every node traversal is a potential cache miss. Replacing that with a Bloom filter and SIMD-probed hash table turns pointer-chasing into sequential memory access, and that is where the 50--500x margins come from.
-
-> **Good systems engineering beating good algorithms is an underappreciated pattern in practice.**
+In short, OmegaMatch is a systems-engineering combination of established
+techniques designed around cache behavior, SIMD probing, multiple cores, and
+memory-mapped reuse. Whether that design beats an automaton, grep, ripgrep, or
+another matcher depends on the pattern lengths, pattern count, match density,
+filters, output requirements, and hardware; the benchmark harness exists to
+measure those tradeoffs explicitly.
 
 ## Compiler Options
 

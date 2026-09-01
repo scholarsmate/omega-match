@@ -6,11 +6,13 @@
 *.so
 *.tmp
 .idea/
+.claude/
 .venv*/
 CMakeCache.txt
 cmake-*/
 build*/
 dist/
+/extern/omega-edit/
 perf_results.csv
 perf_results.png
 perf_main.csv

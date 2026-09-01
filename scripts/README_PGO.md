@@ -192,13 +192,12 @@ For best PGO results:
 
 ## Expected Performance Gains
 
-PGO typically provides:
-- **5-15%** performance improvement for compute-intensive code
-- **Better branch prediction** for conditional code
-- **Improved function inlining** decisions
-- **Optimized loop unrolling** for hot loops
-
-The actual gains depend on the workload and how well the training data represents production usage.
+PGO gives the compiler execution-frequency information that can improve code
+layout, branch placement, and inlining. The result is workload- and
+compiler-dependent: it can improve throughput, have little effect, or regress
+a workload when training is unrepresentative. Compare release and PGO builds
+on production-like data with `scripts/benchmark_scaling.py`; do not assume a
+fixed percentage gain.
 
 ## CI/CD Integration
 
