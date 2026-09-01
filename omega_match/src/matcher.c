@@ -1087,63 +1087,13 @@ core_match(const omega_list_matcher_t *restrict matcher,
                                 ? sm_base + matcher->sm_keys4_offset
                                 : NULL;
 
-  // Optional candidate fast-path: line-start matches can only begin at byte 0
-  // or immediately after a line ending. Word-boundary matches similarly only
-  // need positions where the word/non-word state changes. Prefer line starts
-  // when both filters are active because they are the smaller candidate set.
+  // Optional word-boundary fast-path. Line-start matching instead scans the
+  // input once with an early boundary branch below: materializing every line
+  // start could require about eight bytes of offsets per input byte for
+  // newline-dense data.
   size_t *candidate_pos = NULL;
   size_t candidate_cnt = 0;
-  if (line_start && haystack_size > 0) {
-    // Count and fill by contiguous logical chunks. The prefix sum preserves
-    // global offset order, while both full-memory passes scale with the same
-    // thread setting as matching.
-    size_t *chunk_offsets =
-        (size_t *)calloc((size_t)num_threads + 1, sizeof(size_t));
-    if (unlikely(!chunk_offsets)) {
-      ABORT("calloc line_start chunk offsets");
-    }
-    const size_t chunk_base = haystack_size / (size_t)num_threads;
-    const size_t chunk_extra = haystack_size % (size_t)num_threads;
-    int chunk;
-#ifdef OMEGA_MATCH_USE_OPENMP
-#pragma omp parallel for schedule(static) num_threads(num_threads)
-#endif
-    for (chunk = 0; chunk < num_threads; ++chunk) {
-      const size_t t = (size_t)chunk;
-      const size_t start = t * chunk_base + (t < chunk_extra ? t : chunk_extra);
-      const size_t end = start + chunk_base + (t < chunk_extra ? 1 : 0);
-      size_t count = 0;
-      for (size_t i = start; i < end && i + 1 < haystack_size; ++i) {
-        count += (size_t)is_line_end(haystack[i]);
-      }
-      chunk_offsets[t + 1] = count;
-    }
-    chunk_offsets[0] = 1; // byte zero is always a line start
-    for (int i = 1; i <= num_threads; ++i) {
-      chunk_offsets[i] += chunk_offsets[i - 1];
-    }
-    candidate_cnt = chunk_offsets[num_threads];
-    candidate_pos = (size_t *)malloc(candidate_cnt * sizeof(size_t));
-    if (unlikely(!candidate_pos)) {
-      ABORT("malloc line_start positions");
-    }
-    candidate_pos[0] = 0;
-#ifdef OMEGA_MATCH_USE_OPENMP
-#pragma omp parallel for schedule(static) num_threads(num_threads)
-#endif
-    for (chunk = 0; chunk < num_threads; ++chunk) {
-      const size_t t = (size_t)chunk;
-      const size_t start = t * chunk_base + (t < chunk_extra ? t : chunk_extra);
-      const size_t end = start + chunk_base + (t < chunk_extra ? 1 : 0);
-      size_t w = chunk_offsets[t];
-      for (size_t i = start; i < end && i + 1 < haystack_size; ++i) {
-        if (is_line_end(haystack[i])) {
-          candidate_pos[w++] = i + 1;
-        }
-      }
-    }
-    free(chunk_offsets);
-  } else if (word_boundary) {
+  if (word_boundary && !line_start) {
     // First pass: count boundaries
     size_t cnt = 0;
     uint8_t prev_is_word = 0;
@@ -1307,6 +1257,13 @@ core_match(const omega_list_matcher_t *restrict matcher,
 #pragma omp for schedule(runtime)
 #endif
       for (pos = 0; pos < hsize; ++pos) {
+        // Match only byte zero and bytes immediately following a line ending.
+        // This single parallel pass keeps line-start auxiliary memory constant
+        // even when nearly every byte is a newline.
+        if (line_start && pos > 0 && !is_line_end(haystack[pos - 1])) {
+          continue;
+        }
+
         // Word boundary optimization: skip non-boundary positions early
         const uint8_t curr_char = haystack[pos];
         if (word_boundary) {

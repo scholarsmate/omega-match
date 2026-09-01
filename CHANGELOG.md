@@ -22,8 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with v1-v3 stores.
 - Three- and four-byte patterns use two-byte prefix filters before binary
   search, and Bloom misses probe subsequent hashes lazily.
-- Line-start matching builds and scans only line-start candidates, including
-  parallel candidate construction for thread scaling.
+- Line-start matching uses a parallel single-pass scan with an early boundary
+  branch, avoiding per-line offset storage on newline-dense inputs.
 - PGO anchor workloads now pass the line-start and line-end options they are
   intended to train.
 

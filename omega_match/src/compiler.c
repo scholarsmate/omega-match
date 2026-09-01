@@ -610,7 +610,8 @@ int omega_list_matcher_compiler_destroy(
       // arr3/arr4 contain 32-bit values, so an odd combined element count can
       // leave the following uint64_t key arrays at offset 4 mod 8.
       const long key_array_start = ftell(compiler->compiled_fp);
-      const uint32_t padding = (uint32_t)((8 - (key_array_start & 7L)) & 7L);
+      const uint32_t padding =
+          (uint32_t)((8 - ((key_array_start - sm_start) & 7L)) & 7L);
       if (padding != 0) {
         const uint8_t zero[8] = {0};
         fwrite(zero, padding, 1, compiler->compiled_fp);

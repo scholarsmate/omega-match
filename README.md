@@ -141,7 +141,7 @@ digests matched on the 4 MiB validation corpus.
 | Mode | OmegaMatch PGO | GNU grep 3.11 | ripgrep 15.2 |
 |---|---:|---:|---:|
 | longest + no-overlap | 266 MiB/s | 196 MiB/s | 129 MiB/s |
-| line start | 1,018 MiB/s | 24 MiB/s | 252 MiB/s |
+| line start | 1,188 MiB/s | 24 MiB/s | 252 MiB/s |
 | line end | 606 MiB/s | 27 MiB/s | 51 MiB/s |
 
 OmegaMatch used eight OpenMP threads. GNU grep is single-threaded; ripgrep was

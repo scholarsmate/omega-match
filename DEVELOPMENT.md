@@ -73,14 +73,14 @@ not represent cold-storage latency.
 Environment: Ubuntu 24.04.3 under WSL2, Intel Core Ultra 7 165H, GCC 13.3,
 eight OpenMP threads, GNU grep 3.11, ripgrep 15.2, 29,156 name patterns, and a
 warm 256 MiB KJV-derived corpus on `/tmp`. Values are medians of five runs for
-longest matching and three runs for anchors. Complete outputs were consumed
-at every size; byte counts and SHA-256 digests agreed on the 4 MiB validation
-corpus.
+longest matching and at least three runs for anchors. Complete outputs were
+consumed at every size; byte counts and SHA-256 digests agreed on the 4 MiB
+validation corpus.
 
 | Mode | Original PGO (`cbb6ae4`) | Optimized PGO | GNU grep | ripgrep |
 |---|---:|---:|---:|---:|
 | longest + no-overlap | 148 MiB/s | 266 MiB/s | 196 MiB/s | 129 MiB/s |
-| line start | 179 MiB/s | 1,018 MiB/s | 24 MiB/s | 252 MiB/s |
+| line start | 179 MiB/s | 1,188 MiB/s | 24 MiB/s | 252 MiB/s |
 | line end | 198 MiB/s | 606 MiB/s | 27 MiB/s | 51 MiB/s |
 
 OmegaMatch used eight OpenMP threads. GNU grep is single-threaded, and
@@ -110,11 +110,11 @@ median of seven runs):
 
 | Threads | longest + no-overlap | line start | line end |
 |---:|---:|---:|---:|
-| 1 | 99 MiB/s | 442 MiB/s | 114 MiB/s |
-| 2 | 170 MiB/s | 729 MiB/s | 211 MiB/s |
-| 4 | 289 MiB/s | 1,118 MiB/s | 369 MiB/s |
-| 8 | 443 MiB/s | 1,618 MiB/s | 653 MiB/s |
-| 16 | 610 MiB/s | 2,161 MiB/s | 894 MiB/s |
+| 1 | 99 MiB/s | 660 MiB/s | 114 MiB/s |
+| 2 | 170 MiB/s | 997 MiB/s | 211 MiB/s |
+| 4 | 289 MiB/s | 1,682 MiB/s | 369 MiB/s |
+| 8 | 443 MiB/s | 2,239 MiB/s | 653 MiB/s |
+| 16 | 610 MiB/s | 2,950 MiB/s | 894 MiB/s |
 
 Scaling is substantial but not linear: memory bandwidth, result merging,
 allocation, scheduling, and output become limiting factors. Dense positive
@@ -176,16 +176,16 @@ One-thread Callgrind results on the 1 MiB corpus:
 | Mode | Original instructions | Optimized instructions | Reduction |
 |---|---:|---:|---:|
 | longest + no-overlap | 474.3 M | 128.7 M | 72.9% |
-| line start | 482.0 M | 28.7 M | 94.0% |
+| line start | 482.0 M | 20.3 M | 95.8% |
 | line end | 473.4 M | 127.8 M | 73.0% |
 
 The original profile showed that anchors still ran the full per-byte matcher.
 It also exposed two dominant ordinary-search costs: binary searches for
 three- and four-byte patterns at every byte, and three eager random Bloom
 filter loads even though most candidates fail the first bit. Prefix bitmaps,
-lazy Bloom probing, and explicit line-start candidates account for most of the
-reduction. The optimized longest profile recorded about 384,000 simulated L1
-data misses and 448,000 branch mispredictions.
+lazy Bloom probing, and skipping non-line-start positions before matcher work
+account for most of the reduction. The optimized longest profile recorded
+about 384,000 simulated L1 data misses and 448,000 branch mispredictions.
 
 Other useful tools:
 

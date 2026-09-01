@@ -59,7 +59,7 @@ ripgrep received `-j 8`. Values are medians, not guarantees.
 | Scenario | OmegaMatch PGO | GNU grep 3.11 | ripgrep 15.2 |
 |----------|---------------:|--------------:|---------------:|
 | longest + no-overlap | 266 MiB/s | 196 MiB/s | 129 MiB/s |
-| line start | 1,018 MiB/s | 24 MiB/s | 252 MiB/s |
+| line start | 1,188 MiB/s | 24 MiB/s | 252 MiB/s |
 | line end | 606 MiB/s | 27 MiB/s | 51 MiB/s |
 
 OmegaMatch loaded a persisted pattern store compiled before timing, whereas
