@@ -67,9 +67,11 @@ python scripts/pgo_workflow.py --compiler msvc
 
 3. **Copy profile data**:
    ```bash
-   # For GCC, profile data is in CMakeFiles directory structure
-   rm -rf build-gcc-pgo-use/CMakeFiles
-   cp -r build-gcc-pgo-generate/CMakeFiles build-gcc-pgo-use/
+   # Preserve relative paths, but do not copy instrumented object files.
+   mkdir -p build-gcc-pgo-use
+   (cd build-gcc-pgo-generate && \
+     find CMakeFiles -name '*.gcda' \
+       -exec cp --parents '{}' ../build-gcc-pgo-use/ \;)
    ```
 
 4. **Build optimized version**:

@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   branch, avoiding per-line offset storage on newline-dense inputs.
 - PGO anchor workloads now pass the line-start and line-end options they are
   intended to train.
+- GCC PGO profile transfer copies only `.gcda` counters into the use build,
+  preventing instrumented objects from polluting the optimized build.
 
 ### Fixed
 
