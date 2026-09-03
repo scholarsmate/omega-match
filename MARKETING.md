@@ -54,18 +54,19 @@ This lets the DSL runtime focus on rule semantics while delegating raw scanning 
 The September 2026 Linux/WSL2 snapshot used 29,156 patterns, a warm 256 MiB
 corpus on a native Linux filesystem, and complete output from every tool.
 OmegaMatch used eight OpenMP threads; GNU grep was single-threaded, and
-ripgrep received `-j 8`. Values are medians, not guarantees.
+ripgrep received `-j 8`. Values are five-run medians, not guarantees.
 
-| Scenario | OmegaMatch PGO | GNU grep 3.11 | ripgrep 15.2 |
-|----------|---------------:|--------------:|---------------:|
-| longest + no-overlap | 266 MiB/s | 196 MiB/s | 129 MiB/s |
-| line start | 1,188 MiB/s | 24 MiB/s | 252 MiB/s |
-| line end | 606 MiB/s | 27 MiB/s | 51 MiB/s |
+| Scenario | OM PGO compile + match | OM PGO reused store | GNU grep 3.11 | ripgrep 15.2 |
+|----------|-----------------------:|--------------------:|--------------:|---------------:|
+| longest + no-overlap | 233 MiB/s | 234 MiB/s | 169 MiB/s | 108 MiB/s |
+| line start | 944 MiB/s | 1,113 MiB/s | 23 MiB/s | 227 MiB/s |
+| line end | 497 MiB/s | 525 MiB/s | 26 MiB/s | 49 MiB/s |
 
-OmegaMatch loaded a persisted pattern store compiled before timing, whereas
-grep and ripgrep parsed patterns on every invocation. The anchored comparator
-times include construction of 29,156 regular expressions; the line-end case
-has zero matches in this corpus. See the
+The primary OmegaMatch column includes source-pattern compilation on every
+invocation, as do the grep and ripgrep measurements. The second OmegaMatch
+column shows the intended compile-once/match-many workflow. The anchored
+comparator times include construction of 29,156 regular expressions; the
+line-end case has zero matches in this corpus. See the
 [performance methodology](DEVELOPMENT.md#performance-testing) and reproduce
 the comparison with `scripts/benchmark_scaling.py` on your own data.
 

@@ -8,6 +8,7 @@ exit-on-first-match search. This runner instead:
 
 * generates exact-size corpora on a caller-selected filesystem;
 * drains every comparator's complete output through a pipe;
+* includes OmegaMatch pattern compilation by default and can also time reuse;
 * sorts comparator patterns longest-first and escapes anchored regexes;
 * strips the source UTF-8 BOM so ripgrep and byte-oriented tools agree;
 * verifies output byte count and SHA-256 before recording timings; and
@@ -52,6 +53,7 @@ CASES: dict[str, tuple[str, ...]] = {
 class Tool:
     name: str
     command: Callable[[str, Path, bool], list[str]]
+    pattern_setup: str
     accepted_codes: tuple[int, ...] = (0,)
 
 
@@ -59,6 +61,7 @@ class Tool:
 class Result:
     case: str
     tool: str
+    pattern_setup: str
     mode: str
     threads: int
     input_bytes: int
@@ -232,34 +235,51 @@ def compile_patterns(
 def build_tools(
     olm_binaries: list[tuple[str, Path]],
     compiled: dict[str, Path],
+    source_patterns: Path,
     pattern_paths: dict[str, Path],
     threads: int,
+    olm_pattern_mode: str,
     include_grep: bool,
     include_ripgrep: bool,
 ) -> list[Tool]:
     tools: list[Tool] = []
     for name, binary in olm_binaries:
-        compiled_path = compiled[name]
+        pattern_modes = (
+            ("source", "compiled")
+            if olm_pattern_mode == "both"
+            else (olm_pattern_mode,)
+        )
+        for pattern_mode in pattern_modes:
+            pattern_path = (
+                source_patterns
+                if pattern_mode == "source"
+                else compiled[name]
+            )
+            setup_label = (
+                "compile+match" if pattern_mode == "source" else "match-only"
+            )
 
-        def olm_command(
-            case: str,
-            haystack: Path,
-            quiet: bool,
-            binary: Path = binary,
-            compiled_path: Path = compiled_path,
-        ) -> list[str]:
-            return [
-                str(binary),
-                "match",
-                *(["--quiet"] if quiet else []),
-                "--threads",
-                str(threads),
-                *CASES[case],
-                str(compiled_path),
-                str(haystack),
-            ]
+            def olm_command(
+                case: str,
+                haystack: Path,
+                quiet: bool,
+                binary: Path = binary,
+                pattern_path: Path = pattern_path,
+            ) -> list[str]:
+                return [
+                    str(binary),
+                    "match",
+                    *(["--quiet"] if quiet else []),
+                    "--threads",
+                    str(threads),
+                    *CASES[case],
+                    str(pattern_path),
+                    str(haystack),
+                ]
 
-        tools.append(Tool(f"olm-{name}", olm_command))
+            tools.append(
+                Tool(f"olm-{name}-{setup_label}", olm_command, setup_label)
+            )
 
     if include_grep and shutil.which("grep"):
 
@@ -281,7 +301,7 @@ def build_tools(
                 str(haystack),
             ]
 
-        tools.append(Tool("grep", grep_command, (0, 1)))
+        tools.append(Tool("grep", grep_command, "per-run", (0, 1)))
 
     if include_ripgrep and shutil.which("rg"):
 
@@ -307,7 +327,7 @@ def build_tools(
             command.extend(("-o", "-b", "-f", str(pattern_path), str(haystack)))
             return command
 
-        tools.append(Tool("ripgrep", rg_command, (0, 1)))
+        tools.append(Tool("ripgrep", rg_command, "per-run", (0, 1)))
     return tools
 
 
@@ -348,6 +368,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="output is equivalent CLI work; quiet suppresses only OM output",
     )
     parser.add_argument(
+        "--olm-pattern-mode",
+        choices=("source", "compiled", "both"),
+        default="source",
+        help=(
+            "source includes OM pattern compilation in every timed run; "
+            "compiled times reuse of a store built before timing; both reports both"
+        ),
+    )
+    parser.add_argument(
         "--work-dir",
         type=Path,
         default=Path(os.environ.get("TMPDIR", "/tmp")) / "omega-match-scaling",
@@ -373,10 +402,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     env.update({"LC_ALL": "C", "OMP_DYNAMIC": "FALSE"})
 
     compiled: dict[str, Path] = {}
-    for name, binary in olm_binaries:
-        destination = work_dir / f"patterns-{name}.olm"
-        compile_patterns(binary, args.patterns.resolve(), destination, env)
-        compiled[name] = destination
+    if args.olm_pattern_mode in ("compiled", "both"):
+        for name, binary in olm_binaries:
+            destination = work_dir / f"patterns-{name}.olm"
+            compile_patterns(binary, args.patterns.resolve(), destination, env)
+            compiled[name] = destination
 
     corpora: list[Path] = []
     for size_mib in args.sizes_mib:
@@ -387,8 +417,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     tools = build_tools(
         olm_binaries,
         compiled,
+        args.patterns.resolve(),
         pattern_paths,
         args.threads,
+        args.olm_pattern_mode,
         not args.skip_grep,
         not args.skip_ripgrep,
     )
@@ -400,6 +432,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "cpu_count": os.cpu_count(),
         "threads": args.threads,
         "mode": args.mode,
+        "olm_pattern_mode": args.olm_pattern_mode,
         "runs": args.runs,
         "sizes_mib": args.sizes_mib,
         "cases": args.cases,
@@ -490,6 +523,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result = Result(
                     case=case,
                     tool=tool.name,
+                    pattern_setup=tool.pattern_setup,
                     mode=args.mode,
                     threads=args.threads,
                     input_bytes=input_bytes,

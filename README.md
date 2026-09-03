@@ -117,10 +117,11 @@ cpack -G WIX --config build-msvc-release/CPackConfig.cmake
 ## Performance Testing
 
 Use `scripts/benchmark_scaling.py` for comparative or scaling claims. It
-generates exact-size corpora on a caller-selected filesystem, precompiles the
-OmegaMatch pattern store, drains complete output from every tool, verifies
-byte counts and SHA-256 digests, and records raw samples in CSV and JSON. GNU
-grep and ripgrep are both included when installed.
+generates exact-size corpora on a caller-selected filesystem, drains complete
+output from every tool, verifies byte counts and SHA-256 digests, and records
+raw samples in CSV and JSON. By default, OmegaMatch pattern compilation is
+included in every timed invocation. GNU grep and ripgrep are both included
+when installed.
 
 ```sh
 python3 scripts/benchmark_scaling.py \
@@ -128,38 +129,48 @@ python3 scripts/benchmark_scaling.py \
   --olm pgo=build-gcc-pgo-use/olm \
   --sizes-mib 4,16,64,256 \
   --cases longest-no-overlap,line-start,line-end \
-  --threads 8 --runs 5 --work-dir /tmp/omega-match-scaling
+  --threads 8 --runs 5 --olm-pattern-mode both \
+  --work-dir /tmp/omega-match-scaling
 ```
 
 The checked-in `data/names.txt` contains 29,156 patterns. On an Intel Core
 Ultra 7 165H under Ubuntu 24.04/WSL2, the September 2026 PGO build produced
-the following medians over a warm 256 MiB KJV-derived corpus on the native
-Linux filesystem. These are output-equivalent CLI measurements: every tool's
-complete output was consumed at every size, and byte counts plus SHA-256
-digests matched on the 4 MiB validation corpus.
+the following five-run medians over a warm 256 MiB KJV-derived corpus on the
+native Linux filesystem. These are output-equivalent CLI measurements: every
+tool's complete output was consumed, and byte counts plus SHA-256 digests were
+validated in companion correctness runs.
 
-| Mode | OmegaMatch PGO | GNU grep 3.11 | ripgrep 15.2 |
-|---|---:|---:|---:|
-| longest + no-overlap | 266 MiB/s | 196 MiB/s | 129 MiB/s |
-| line start | 1,188 MiB/s | 24 MiB/s | 252 MiB/s |
-| line end | 606 MiB/s | 27 MiB/s | 51 MiB/s |
+| Mode | OM PGO compile + match | OM PGO reused store | GNU grep 3.11 | ripgrep 15.2 |
+|---|---:|---:|---:|---:|
+| longest + no-overlap | 233 MiB/s | 234 MiB/s | 169 MiB/s | 108 MiB/s |
+| line start | 944 MiB/s | 1,113 MiB/s | 23 MiB/s | 227 MiB/s |
+| line end | 497 MiB/s | 525 MiB/s | 26 MiB/s | 49 MiB/s |
 
 OmegaMatch used eight OpenMP threads. GNU grep is single-threaded; ripgrep was
 given `-j 8`, although a single input file does not necessarily use all eight
-workers. OmegaMatch's persisted pattern store was compiled before timing,
-while grep and ripgrep rebuild their pattern engines on each invocation. That
-is representative of OmegaMatch's intended match-many deployment model, but
-it is not a scan-kernel-only comparison. Regex construction dominates much of
-the anchored comparator time, and the line-end case has no matches in this
-corpus. The output sizes at 256 MiB were 60.9 MB, 16.4 MB, and 0 bytes for the
-three rows respectively.
+workers. The primary OmegaMatch column includes reading 29,156 source patterns,
+compiling and serializing a temporary store, mapping it, matching, and writing
+the results on every invocation. The reuse column starts from a persisted
+store, OmegaMatch's intended match-many deployment model. grep and ripgrep
+parse and compile their pattern files on every invocation. Regex construction
+dominates much of the anchored comparator time, and the line-end case has no
+matches in this corpus. The output sizes at 256 MiB were 60.9 MB, 16.4 MB, and
+0 bytes for the three rows respectively.
 
-For `longest + no-overlap`, OmegaMatch PGO rose from 154 MiB/s at 4 MiB to
-224, 274, and 266 MiB/s at 16, 64, and 256 MiB respectively; it did not
-progressively degrade with input size. Results depend on CPU, tool versions,
-pattern distribution, match density, storage, cache state, thread count, and
-whether output is materialized. Treat this snapshot as a reproducible data
-point, not a universal throughput guarantee. See
+For output-equivalent `longest + no-overlap`, the same harness measured:
+
+| Input | OM compile + match | OM reused store | GNU grep | ripgrep |
+|---:|---:|---:|---:|---:|
+| 4 MiB | 74 MiB/s | 152 MiB/s | 109 MiB/s | 33 MiB/s |
+| 16 MiB | 153 MiB/s | 209 MiB/s | 150 MiB/s | 70 MiB/s |
+| 64 MiB | 216 MiB/s | 228 MiB/s | 167 MiB/s | 103 MiB/s |
+| 256 MiB | 234 MiB/s | 256 MiB/s | 176 MiB/s | 115 MiB/s |
+
+Compilation is visible on small inputs and amortizes as the haystack grows;
+OmegaMatch did not progressively degrade in this run. Results depend on CPU,
+tool versions, pattern distribution, match density, storage, cache state,
+thread count, and whether output is materialized. Treat this snapshot as a
+reproducible data point, not a universal throughput guarantee. See
 [DEVELOPMENT.md](DEVELOPMENT.md#performance-testing) for methodology,
 output-suppressed thread and pattern-count scaling, profiling results, and
 known pitfalls.
@@ -210,6 +221,7 @@ python3 scripts/benchmark_scaling.py \
   --olm release=build-gcc-release/olm \
   --olm gcc-pgo=build-gcc-pgo-use/olm \
   --sizes-mib 64,256 --runs 5 --skip-grep --skip-ripgrep \
+  --olm-pattern-mode compiled \
   --work-dir /tmp/omega-match-pgo-comparison
 ```
 
@@ -267,6 +279,7 @@ python3 scripts/benchmark_scaling.py \
   --olm release=build-gcc-release/olm \
   --olm pgo=build-gcc-pgo-use/olm \
   --sizes-mib 16,64,256 --runs 5 --skip-grep --skip-ripgrep \
+  --olm-pattern-mode compiled \
   --work-dir /tmp/omega-match-pgo-comparison
 ```
 
@@ -303,7 +316,8 @@ ls -la data/
 python3 scripts/benchmark_scaling.py \
   --olm release=build-gcc-release/olm \
   --olm pgo=build-gcc-pgo-use/olm \
-  --sizes-mib 64,256 --runs 5 --skip-grep --skip-ripgrep
+  --sizes-mib 64,256 --runs 5 --skip-grep --skip-ripgrep \
+  --olm-pattern-mode compiled
 
 # Add custom training workloads to pgo_workflow.py
 ```

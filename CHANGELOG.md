@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   intended to train.
 - GCC PGO profile transfer copies only `.gcda` counters into the use build,
   preventing instrumented objects from polluting the optimized build.
+- Comparative benchmarks now include OmegaMatch pattern compilation by
+  default and can report one-shot and persisted-store timings side by side.
 
 ### Fixed
 

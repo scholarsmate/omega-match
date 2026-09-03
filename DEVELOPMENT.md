@@ -45,23 +45,29 @@ python3 scripts/benchmark_scaling.py \
   --sizes-mib 4,16,64,256 \
   --cases longest-no-overlap,line-start,line-end \
   --threads 8 --runs 5 --mode output \
+  --olm-pattern-mode both \
   --work-dir /tmp/omega-match-scaling
 ```
 
 The harness:
 
 - generates exact-size corpora in `--work-dir`;
-- compiles each OmegaMatch pattern store outside the timed region;
+- includes OmegaMatch source-pattern compilation in each timed run by default;
+- can also report a persisted store compiled outside the timed region;
 - strips the source UTF-8 BOM so offsets agree across byte-oriented tools;
 - orders comparator patterns longest-first and regex-escapes anchored forms;
 - consumes every byte of stdout instead of redirecting it to `/dev/null`;
 - checks output size and SHA-256 on the smallest corpus; and
 - writes all samples and environment metadata to CSV and JSON.
 
-`--mode output` compares complete CLI work. `--mode quiet` passes `--quiet` to
-OmegaMatch only and is intended for matcher/thread-scaling analysis, not a
-direct comparison with grep or ripgrep. Use `--skip-grep` and
-`--skip-ripgrep` for OmegaMatch-only runs.
+`--olm-pattern-mode source` (the default) provides the fair one-shot CLI
+comparison: OmegaMatch compiles its source list during every timed invocation,
+just as grep and ripgrep compile their pattern files. Use `both` to report that
+alongside the intended compile-once/match-many workflow, or `compiled` to
+isolate persisted-store reuse. `--mode output` compares complete CLI work.
+`--mode quiet` passes `--quiet` to OmegaMatch only and is intended for
+matcher/thread-scaling analysis, not a direct comparison with grep or ripgrep.
+Use `--skip-grep` and `--skip-ripgrep` for OmegaMatch-only runs.
 
 Put large generated corpora on a native, fast filesystem. In WSL, `/tmp` or a
 Linux home directory avoids making Windows-mounted filesystem behavior part of
@@ -72,41 +78,39 @@ not represent cold-storage latency.
 
 Environment: Ubuntu 24.04.3 under WSL2, Intel Core Ultra 7 165H, GCC 13.3,
 eight OpenMP threads, GNU grep 3.11, ripgrep 15.2, 29,156 name patterns, and a
-warm 256 MiB KJV-derived corpus on `/tmp`. Values are medians of five runs for
-longest matching and at least three runs for anchors. Complete outputs were
-consumed at every size; byte counts and SHA-256 digests agreed on the 4 MiB
-validation corpus.
+warm 256 MiB KJV-derived corpus on `/tmp`. Values are medians of five runs.
+Complete outputs were consumed; byte counts and SHA-256 digests agreed in
+companion correctness runs.
 
-| Mode | Original PGO (`cbb6ae4`) | Optimized PGO | GNU grep | ripgrep |
+| Mode | OM PGO compile + match | OM PGO reused store | GNU grep | ripgrep |
 |---|---:|---:|---:|---:|
-| longest + no-overlap | 148 MiB/s | 266 MiB/s | 196 MiB/s | 129 MiB/s |
-| line start | 179 MiB/s | 1,188 MiB/s | 24 MiB/s | 252 MiB/s |
-| line end | 198 MiB/s | 606 MiB/s | 27 MiB/s | 51 MiB/s |
+| longest + no-overlap | 233 MiB/s | 234 MiB/s | 169 MiB/s | 108 MiB/s |
+| line start | 944 MiB/s | 1,113 MiB/s | 23 MiB/s | 227 MiB/s |
+| line end | 497 MiB/s | 525 MiB/s | 26 MiB/s | 49 MiB/s |
 
 OmegaMatch used eight OpenMP threads. GNU grep is single-threaded, and
 ripgrep's `-j 8` does not guarantee eight-way processing of one input file.
-OmegaMatch loaded a store compiled outside the timed region; grep and ripgrep
-parsed their pattern files during every invocation. This measures the intended
-compile-once/match-many CLI workflow, including each comparator's unavoidable
-startup, rather than isolated scan kernels. The anchored tools also compile
-29,156 regular expressions, which dominates much of their elapsed time. At
-256 MiB, output sizes were 60,867,206 bytes for longest matching, 16,418,305
-bytes for line start, and zero for line end.
+The primary OmegaMatch column reads, compiles, serializes, and maps the source
+patterns during every invocation. The second column reuses a store built
+outside timing. grep and ripgrep parse and compile their files per invocation.
+The anchored comparators compile 29,156 regular expressions, which dominates
+much of their elapsed time. At 256 MiB, output sizes were 60,867,206 bytes for
+longest matching, 16,418,305 bytes for line start, and zero for line end.
 
 Input-size scaling for output-equivalent `longest + no-overlap`:
 
-| Input | Original PGO | Optimized PGO | GNU grep | ripgrep |
+| Input | OM compile + match | OM reused store | GNU grep | ripgrep |
 |---:|---:|---:|---:|---:|
-| 4 MiB | 113 MiB/s | 154 MiB/s | 83 MiB/s | 31 MiB/s |
-| 16 MiB | 126 MiB/s | 224 MiB/s | 176 MiB/s | 72 MiB/s |
-| 64 MiB | 137 MiB/s | 274 MiB/s | 203 MiB/s | 109 MiB/s |
-| 256 MiB | 148 MiB/s | 266 MiB/s | 196 MiB/s | 129 MiB/s |
+| 4 MiB | 74 MiB/s | 152 MiB/s | 109 MiB/s | 33 MiB/s |
+| 16 MiB | 153 MiB/s | 209 MiB/s | 150 MiB/s | 70 MiB/s |
+| 64 MiB | 216 MiB/s | 228 MiB/s | 167 MiB/s | 103 MiB/s |
+| 256 MiB | 234 MiB/s | 256 MiB/s | 176 MiB/s | 115 MiB/s |
 
 The larger files amortize startup and pattern-engine construction. OmegaMatch
 does not progressively lose throughput as the haystack grows in this test.
 
-Output-suppressed PGO matcher scaling on the 256 MiB corpus (`--mode quiet`,
-median of seven runs):
+Output-suppressed PGO matcher scaling on the 256 MiB corpus (`--mode quiet
+--olm-pattern-mode compiled`, median of seven runs):
 
 | Threads | longest + no-overlap | line start | line end |
 |---:|---:|---:|---:|
@@ -120,14 +124,14 @@ Scaling is substantial but not linear: memory bandwidth, result merging,
 allocation, scheduling, and output become limiting factors. Dense positive
 matches can therefore scale differently from negative or sparse workloads.
 
-Pattern-count tests make that distinction visible. On a 64 MiB corpus, nested
-name subsets reduced release OmegaMatch throughput from about 280 MiB/s at 256
-patterns to 118 MiB/s at 29,156 patterns while output grew from zero to
-13.8 MiB. With synthetic non-matching 16-byte patterns, OmegaMatch instead
-stayed between 833 and 919 MiB/s from 256 through 65,536 patterns; at 65,536,
-GNU grep reached 276 MiB/s and ripgrep 159 MiB/s. The search structure scales
-well with pattern count, but match density and result materialization can still
-dominate an end-to-end workload.
+Persisted-store pattern-count tests make that distinction visible. On a 64 MiB
+corpus, nested name subsets reduced release OmegaMatch throughput from about
+280 MiB/s at 256 patterns to 118 MiB/s at 29,156 patterns while output grew
+from zero to 13.8 MiB. With synthetic non-matching 16-byte patterns,
+OmegaMatch instead stayed between 833 and 919 MiB/s from 256 through 65,536
+patterns; at 65,536, GNU grep reached 276 MiB/s and ripgrep 159 MiB/s. The
+search structure scales well with pattern count, but match density and result
+materialization can still dominate an end-to-end workload.
 
 ### Legacy harness
 
