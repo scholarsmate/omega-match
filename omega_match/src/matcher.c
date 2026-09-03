@@ -87,6 +87,10 @@ struct omega_list_matcher_struct {
   transform_table_t *transform_table;
   const uint8_t *short_matcher_base;
   short_matcher_t short_matcher;
+  // Two-byte prefix filters avoid binary-searching the 3/4-byte pattern
+  // arrays at positions that cannot possibly match.
+  uint8_t short_prefix3[8192];
+  uint8_t short_prefix4[8192];
   // Short matcher key arrays (offsets into short_matcher_base when has_keys)
   uint32_t sm_keys1_offset;    // 256 packed uint64_t entries for 1-byte patterns
   const uint32_t *sm_vals2;    // sorted 2-byte values for key lookup
@@ -351,7 +355,17 @@ static int oa_matcher_load(const char *path, omega_list_matcher_t *matcher) {
   offset += BLOOM_HEADER_SIZE;
   matcher->bf.bit_size = load_u32_unaligned(map + offset);
   offset += sizeof(matcher->bf.bit_size);
+  if (hdr->version >= 4) {
+    if (unlikely(
+            !file_span_in_bounds(map, size, map + offset, sizeof(uint32_t)))) {
+      LOAD_FAIL();
+    }
+    offset += sizeof(uint32_t); // reserved alignment word
+  }
   if (unlikely(hdr->bloom_filter_size > size - offset)) {
+    LOAD_FAIL();
+  }
+  if (unlikely(hdr->version >= 4 && ((uintptr_t)(map + offset) & 7u) != 0)) {
     LOAD_FAIL();
   }
   matcher->bf.bits = (uint64_t *)(map + offset);
@@ -449,8 +463,25 @@ static int oa_matcher_load(const char *path, omega_list_matcher_t *matcher) {
       matcher->short_matcher.arr4 = NULL;
     }
 
+    for (uint32_t i = 0; i < matcher->short_matcher.len3; ++i) {
+      const uint32_t prefix = matcher->short_matcher.arr3[i] >> 8;
+      matcher->short_prefix3[prefix >> 3] |= (uint8_t)(1u << (prefix & 7));
+    }
+    for (uint32_t i = 0; i < matcher->short_matcher.len4; ++i) {
+      const uint32_t prefix = matcher->short_matcher.arr4[i] >> 16;
+      matcher->short_prefix4[prefix >> 3] |= (uint8_t)(1u << (prefix & 7));
+    }
+
     // Read short matcher key arrays (version >= 3 with FLAG_HAS_KEYS)
     if (matcher->has_keys) {
+      if (hdr->version >= 4) {
+        const size_t relative = (size_t)(p - sm_start);
+        const size_t padding = (8 - (relative & 7u)) & 7u;
+        if (unlikely(!file_span_in_bounds(map, size, p, padding))) {
+          LOAD_FAIL();
+        }
+        p += padding;
+      }
       // 1-byte keys: 256 entries
       if (unlikely(!file_span_in_bounds(map, size, p, 256 * sizeof(uint64_t)))) {
         LOAD_FAIL();
@@ -471,6 +502,18 @@ static int oa_matcher_load(const char *path, omega_list_matcher_t *matcher) {
         }
         matcher->sm_vals2 = (const uint32_t *)p;
         p += matcher->sm_len2_keyed * sizeof(uint32_t);
+      } else {
+        matcher->sm_vals2 = NULL;
+      }
+      if (hdr->version >= 4) {
+        const size_t relative = (size_t)(p - sm_start);
+        const size_t padding = (8 - (relative & 7u)) & 7u;
+        if (unlikely(!file_span_in_bounds(map, size, p, padding))) {
+          LOAD_FAIL();
+        }
+        p += padding;
+      }
+      if (matcher->sm_len2_keyed > 0) {
         if (unlikely(!file_span_in_bounds(map, size, p,
                                           matcher->sm_len2_keyed *
                                               sizeof(uint64_t)))) {
@@ -479,7 +522,6 @@ static int oa_matcher_load(const char *path, omega_list_matcher_t *matcher) {
         matcher->sm_keys2_offset = (uint32_t)(p - sm_start);
         p += matcher->sm_len2_keyed * sizeof(uint64_t);
       } else {
-        matcher->sm_vals2 = NULL;
         matcher->sm_keys2_offset = 0;
       }
       // 3-byte keys: parallel to arr3
@@ -931,6 +973,13 @@ short_matcher_query2_fast(const short_matcher_t *restrict sm,
 }
 
 static OLM_ALWAYS_INLINE int
+short_matcher_prefix_query(const uint8_t *restrict bitmap,
+                           const uint8_t *restrict ptr) {
+  const uint16_t prefix = ((uint16_t)ptr[0] << 8) | ptr[1];
+  return bitmap[prefix >> 3] & (1u << (prefix & 7));
+}
+
+static OLM_ALWAYS_INLINE int
 short_matcher_query3_fast(const short_matcher_t *restrict sm,
                          const uint8_t *restrict ptr) {
   if (unlikely(sm->len3 == 0)) return 0;
@@ -1010,6 +1059,8 @@ core_match(const omega_list_matcher_t *restrict matcher,
   const uint8_t *restrict pat_st = matcher->pattern_store;
   const bloom_filter_t *restrict bf = &matcher->bf;
   const short_matcher_t *restrict sm = &matcher->short_matcher;
+  const uint8_t *restrict sm_prefix3 = matcher->short_prefix3;
+  const uint8_t *restrict sm_prefix4 = matcher->short_prefix4;
   const uint32_t smallest = matcher->header->smallest_pattern_length;
   const uint32_t largest = matcher->header->largest_pattern_length;
 
@@ -1036,10 +1087,13 @@ core_match(const omega_list_matcher_t *restrict matcher,
                                 ? sm_base + matcher->sm_keys4_offset
                                 : NULL;
 
-  // Optional boundary fast-path: precompute boundary positions and iterate only them
-  size_t *boundary_pos = NULL;
-  size_t boundary_cnt = 0;
-  if (word_boundary) {
+  // Optional word-boundary fast-path. Line-start matching instead scans the
+  // input once with an early boundary branch below: materializing every line
+  // start could require about eight bytes of offsets per input byte for
+  // newline-dense data.
+  size_t *candidate_pos = NULL;
+  size_t candidate_cnt = 0;
+  if (word_boundary && !line_start) {
     // First pass: count boundaries
     size_t cnt = 0;
     uint8_t prev_is_word = 0;
@@ -1052,9 +1106,9 @@ core_match(const omega_list_matcher_t *restrict matcher,
       prev_is_word = curr_is_word;
     }
     if (cnt > 0) {
-      boundary_pos = (size_t *)malloc(cnt * sizeof(size_t));
-      if (unlikely(!boundary_pos)) {
-        ABORT("malloc boundary_pos");
+      candidate_pos = (size_t *)malloc(cnt * sizeof(size_t));
+      if (unlikely(!candidate_pos)) {
+        ABORT("malloc word_boundary positions");
       }
       // Second pass: fill positions
       size_t w = 0;
@@ -1063,11 +1117,11 @@ core_match(const omega_list_matcher_t *restrict matcher,
         const uint8_t c = haystack[i];
         const uint8_t curr_is_word = IS_WORD(c) ? 1 : 0;
         if (curr_is_word != prev_is_word) {
-          boundary_pos[w++] = i;
+          candidate_pos[w++] = i;
         }
         prev_is_word = curr_is_word;
       }
-      boundary_cnt = w;
+      candidate_cnt = w;
     }
   }
 
@@ -1087,14 +1141,14 @@ core_match(const omega_list_matcher_t *restrict matcher,
     thread_matches[tid] = local;
     const ptrdiff_t hsize = (ptrdiff_t)haystack_size;
 
-    if (word_boundary && boundary_cnt > 0) {
+    if (candidate_pos && candidate_cnt > 0) {
       // MSVC requires signed integral type for OpenMP loop index (C3016)
       ptrdiff_t bi;
 #ifdef OMEGA_MATCH_USE_OPENMP
 #pragma omp for schedule(runtime)
 #endif
-      for (bi = 0; bi < (ptrdiff_t)boundary_cnt; ++bi) {
-        const ptrdiff_t pos = (ptrdiff_t)boundary_pos[bi];
+      for (bi = 0; bi < (ptrdiff_t)candidate_cnt; ++bi) {
+        const ptrdiff_t pos = (ptrdiff_t)candidate_pos[bi];
         const uint8_t *restrict h_ptr = haystack + pos;
         const size_t remaining = hsize - pos;
 
@@ -1126,8 +1180,10 @@ core_match(const omega_list_matcher_t *restrict matcher,
           const bool line_start_ok = !line_start || is_at_line_start(haystack, pos);
 
           if (use_sm4 && remaining >= 4) {
-            const int idx4 = sm_keys4 ? short_matcher_index4_fast(sm, h_ptr)
-                                      : (short_matcher_query4_fast(sm, h_ptr) ? 0 : -1);
+            const int idx4 =
+                !short_matcher_prefix_query(sm_prefix4, h_ptr) ? -1
+                : sm_keys4 ? short_matcher_index4_fast(sm, h_ptr)
+                           : (short_matcher_query4_fast(sm, h_ptr) ? 0 : -1);
             if (idx4 >= 0) {
               const bool word_boundary_ok =
                   !word_boundary || (pos + 4 >= hsize) ||
@@ -1144,8 +1200,10 @@ core_match(const omega_list_matcher_t *restrict matcher,
             }
           }
           if (use_sm3 && remaining >= 3) {
-            const int idx3 = sm_keys3 ? short_matcher_index3_fast(sm, h_ptr)
-                                      : (short_matcher_query3_fast(sm, h_ptr) ? 0 : -1);
+            const int idx3 =
+                !short_matcher_prefix_query(sm_prefix3, h_ptr) ? -1
+                : sm_keys3 ? short_matcher_index3_fast(sm, h_ptr)
+                           : (short_matcher_query3_fast(sm, h_ptr) ? 0 : -1);
             if (idx3 >= 0) {
               const bool word_boundary_ok =
                   !word_boundary || (pos + 3 >= hsize) ||
@@ -1199,6 +1257,13 @@ core_match(const omega_list_matcher_t *restrict matcher,
 #pragma omp for schedule(runtime)
 #endif
       for (pos = 0; pos < hsize; ++pos) {
+        // Match only byte zero and bytes immediately following a line ending.
+        // This single parallel pass keeps line-start auxiliary memory constant
+        // even when nearly every byte is a newline.
+        if (line_start && pos > 0 && !is_line_end(haystack[pos - 1])) {
+          continue;
+        }
+
         // Word boundary optimization: skip non-boundary positions early
         const uint8_t curr_char = haystack[pos];
         if (word_boundary) {
@@ -1244,8 +1309,10 @@ core_match(const omega_list_matcher_t *restrict matcher,
         
         // Check length 4 patterns first (most selective) - better cache utilization
         if (use_sm4 && remaining >= 4) {
-          const int idx4 = sm_keys4 ? short_matcher_index4_fast(sm, h_ptr)
-                                    : (short_matcher_query4_fast(sm, h_ptr) ? 0 : -1);
+          const int idx4 =
+              !short_matcher_prefix_query(sm_prefix4, h_ptr) ? -1
+              : sm_keys4 ? short_matcher_index4_fast(sm, h_ptr)
+                         : (short_matcher_query4_fast(sm, h_ptr) ? 0 : -1);
           if (idx4 >= 0) {
             const bool word_boundary_ok =
                 !word_boundary || (pos + 4 >= hsize) ||
@@ -1266,8 +1333,10 @@ core_match(const omega_list_matcher_t *restrict matcher,
 
         // Check length 3 patterns
         if (use_sm3 && remaining >= 3) {
-          const int idx3 = sm_keys3 ? short_matcher_index3_fast(sm, h_ptr)
-                                    : (short_matcher_query3_fast(sm, h_ptr) ? 0 : -1);
+          const int idx3 =
+              !short_matcher_prefix_query(sm_prefix3, h_ptr) ? -1
+              : sm_keys3 ? short_matcher_index3_fast(sm, h_ptr)
+                         : (short_matcher_query3_fast(sm, h_ptr) ? 0 : -1);
           if (idx3 >= 0) {
             const bool word_boundary_ok =
                 !word_boundary || (pos + 3 >= hsize) ||
@@ -1331,8 +1400,8 @@ core_match(const omega_list_matcher_t *restrict matcher,
   omega_match_results_t *results = finalize_match_results(
       thread_matches, max_threads, no_overlap, longest_only);
 
-  if (boundary_pos) {
-    free(boundary_pos);
+  if (candidate_pos) {
+    free(candidate_pos);
   }
 
   if (matcher->stats) {

@@ -720,6 +720,9 @@ def run_comprehensive_pgo_training(
                         "match",
                         "--output",
                         match_output_file,
+                        "--line-start",
+                        "--longest",
+                        "--no-overlap",
                         "data/line_anchor_patterns.txt",
                         "data/line_anchor_haystack.txt",
                     ],
@@ -731,6 +734,9 @@ def run_comprehensive_pgo_training(
                         "match",
                         "--output",
                         match_output_file,
+                        "--line-end",
+                        "--longest",
+                        "--no-overlap",
                         "data/line_exact_patterns.txt",
                         "data/line_exact_haystack.txt",
                     ],
@@ -742,6 +748,10 @@ def run_comprehensive_pgo_training(
                         "match",
                         "--output",
                         match_output_file,
+                        "--line-start",
+                        "--line-end",
+                        "--longest",
+                        "--no-overlap",
                         "data/line_exact_match_patterns.txt",
                         "data/line_exact_match_haystack.txt",
                     ],
@@ -897,25 +907,26 @@ def copy_gcc_profile_data(project_root: Path) -> bool:
         print("Warning: No CMakeFiles directory found in generate build")
         return False
 
-    # Ensure the use directory exists
-    use_dir.mkdir(exist_ok=True)
-
-    # Copy the entire CMakeFiles directory structure
-    if use_cmake_files.exists():
-        shutil.rmtree(use_cmake_files)
-
-    shutil.copytree(generate_cmake_files, use_cmake_files)
-
-    # Count profile data files
-    gcda_files = list(use_cmake_files.rglob("*.gcda"))
-    print(f"Copied {len(gcda_files)} .gcda profile data files")
-
-    if len(gcda_files) == 0:
+    source_profiles = sorted(generate_cmake_files.rglob("*.gcda"))
+    if not source_profiles:
         print(
             "Warning: No .gcda files found. Training may not have generated profile data."
         )
         return False
 
+    # Copy only profile counters. Copying the entire CMakeFiles tree also
+    # carries instrumented object files into the use build, where they can be
+    # reused or linked without the generate-phase gcov runtime.
+    use_cmake_files.mkdir(parents=True, exist_ok=True)
+    for stale_profile in use_cmake_files.rglob("*.gcda"):
+        stale_profile.unlink()
+    for source_profile in source_profiles:
+        relative_path = source_profile.relative_to(generate_cmake_files)
+        destination = use_cmake_files / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_profile, destination)
+
+    print(f"Copied {len(source_profiles)} .gcda profile data files")
     print("Profile data copied successfully")
     return True
 

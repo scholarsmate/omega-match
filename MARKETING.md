@@ -8,10 +8,10 @@ OmegaMatch is a fast, embeddable, multi‑pattern exact matcher for products and
 ## At a Glance
 | Capability | What it means for you |
 |------------|------------------------|
-| Memory‑mapped compiled pattern store | Compile once; deploy everywhere; near-zero warmup. |
-| Multi-threaded (OpenMP) core | Scales with cores for batch or streaming workloads. |
-| Profile-Guided Optimization (PGO) builds | Optional variants (Linux: GCC & Clang, Windows: MSVC) yielding typical +5–20% throughput on representative workloads. |
-| Two-tier pipeline (Bloom + hash table) | Filters >90% of non-matches early; fewer cache misses; higher throughput. |
+| Memory‑mapped compiled pattern store | Compile once and reuse with low matcher setup cost. |
+| Multi-threaded (OpenMP) core | Parallel matching with configurable thread counts. |
+| Profile-Guided Optimization (PGO) builds | Optional Linux GCC/Clang and Windows MSVC variants; gains are workload-dependent and measurable with the included harness. |
+| Two-tier pipeline (Bloom + hash table) | Rejects many non-matches before exact lookup. |
 | Specialized short‑pattern accelerator | Ultra-fast handling of 1–4 byte patterns (bitmap + binary search). |
 | Rich post-filters | Word/line anchors, longest-only, no-overlap, prefix/suffix constraints. |
 | Transform layer | Case-insensitive, ignore punctuation, elide whitespace — without per-call reallocation. |
@@ -50,19 +50,24 @@ This lets the DSL runtime focus on rule semantics while delegating raw scanning 
 
 ---
 ## Performance Snapshot (Representative Excerpts)
-Measured via included `perf_test.py` on a sample dataset (≈2K surname patterns over ≈4MB text). These are *illustrative*, not guarantees; always benchmark with your own corpus.
 
-| Scenario | Release (MB/s) | Grep (MB/s) | Ratio (Ω / Grep) | Notes |
-|----------|----------------|-------------|------------------|-------|
-| Baseline (multi-pattern) | 7992.79 | N/A | — | High raw throughput. |
-| line-end + ignore-case | 6336.87 | 12.49 | 507.36× | Anchor + CI optimization shines. |
-| line-start + line-end | 7988.92 | 102.85 | 77.68× | Dual anchors reduce candidate set. |
-| ignore-case + word-boundary | 8924.43 | 159.52 | 55.95× | Structural boundary filtering. |
-| longest + no-overlap | 7578.93 | 8696.32 | 0.87× | Transparent case where grep is comparable/faster. |
+The September 2026 Linux/WSL2 snapshot used 29,156 patterns, a warm 256 MiB
+corpus on a native Linux filesystem, and complete output from every tool.
+OmegaMatch used eight OpenMP threads; GNU grep was single-threaded, and
+ripgrep received `-j 8`. Values are medians, not guarantees.
 
-**Interpretation:** OmegaMatch excels on structurally constrained multi‑pattern workloads (anchors / boundaries) and remains competitive even when post‑filters reduce raw scan efficiency. Showing a slower case builds trust and clarifies fit boundaries.
+| Scenario | OmegaMatch PGO | GNU grep 3.11 | ripgrep 15.2 |
+|----------|---------------:|--------------:|---------------:|
+| longest + no-overlap | 266 MiB/s | 196 MiB/s | 129 MiB/s |
+| line start | 1,188 MiB/s | 24 MiB/s | 252 MiB/s |
+| line end | 606 MiB/s | 27 MiB/s | 51 MiB/s |
 
-> Run the suite yourself: `python perf_test.py --show-status` (auto-falls back if system `grep` unavailable).
+OmegaMatch loaded a persisted pattern store compiled before timing, whereas
+grep and ripgrep parsed patterns on every invocation. The anchored comparator
+times include construction of 29,156 regular expressions; the line-end case
+has zero matches in this corpus. See the
+[performance methodology](DEVELOPMENT.md#performance-testing) and reproduce
+the comparison with `scripts/benchmark_scaling.py` on your own data.
 
 ---
 ## Ideal Use Cases

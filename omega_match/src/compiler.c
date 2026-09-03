@@ -406,8 +406,17 @@ int omega_list_matcher_compiler_destroy(
 
   compiled_header_t header = {0};
 
-  // Make sure the file pointer is at the end of the file
+  // Make sure the next serialized section begins on an 8-byte boundary. The
+  // padding belongs to the pattern-store span but is never referenced by a
+  // pattern offset.
   fseek(compiler->compiled_fp, 0, SEEK_END);
+  const long pattern_store_end = ftell(compiler->compiled_fp);
+  const uint32_t pattern_store_padding =
+      (uint32_t)((8 - (pattern_store_end & 7L)) & 7L);
+  if (pattern_store_padding != 0) {
+    const uint8_t zero[8] = {0};
+    fwrite(zero, pattern_store_padding, 1, compiler->compiled_fp);
+  }
   header.pattern_store_size =
       ftell(compiler->compiled_fp) - sizeof(compiled_header_t);
 
@@ -598,6 +607,15 @@ int omega_list_matcher_compiler_destroy(
 
     // Write key arrays for short matcher (only when FLAG_HAS_KEYS is set)
     if (compiler->has_keys) {
+      // arr3/arr4 contain 32-bit values, so an odd combined element count can
+      // leave the following uint64_t key arrays at offset 4 mod 8.
+      const long key_array_start = ftell(compiler->compiled_fp);
+      const uint32_t padding =
+          (uint32_t)((8 - ((key_array_start - sm_start) & 7L)) & 7L);
+      if (padding != 0) {
+        const uint8_t zero[8] = {0};
+        fwrite(zero, padding, 1, compiler->compiled_fp);
+      }
       // 1-byte keys: 256 entries indexed by byte value
       fwrite(compiler->smb.keys1, sizeof(uint64_t), 256, compiler->compiled_fp);
       // 2-byte keys: sparse sorted array
@@ -605,6 +623,17 @@ int omega_list_matcher_compiler_destroy(
       if (compiler->smb.len2_keyed > 0) {
         fwrite(compiler->smb.vals2, sizeof(uint32_t), compiler->smb.len2_keyed,
                compiler->compiled_fp);
+      }
+      // The uint32_t count and values may leave the following uint64_t key
+      // arrays at offset 4 mod 8. Keep every v4 key array naturally aligned.
+      const long key2_array_start = ftell(compiler->compiled_fp);
+      const uint32_t key2_padding =
+          (uint32_t)((8 - ((key2_array_start - sm_start) & 7L)) & 7L);
+      if (key2_padding != 0) {
+        const uint8_t zero[8] = {0};
+        fwrite(zero, key2_padding, 1, compiler->compiled_fp);
+      }
+      if (compiler->smb.len2_keyed > 0) {
         fwrite(compiler->smb.keys2, sizeof(uint64_t), compiler->smb.len2_keyed,
                compiler->compiled_fp);
       }

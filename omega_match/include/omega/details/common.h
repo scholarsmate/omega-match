@@ -16,7 +16,7 @@
 // --- Magic and version ---
 #define HEADER_MAGIC "0MGM4tCH"
 #define HEADER_MAGIC_SIZE (8)
-#define VERSION (3)
+#define VERSION (4)
 
 // --- Flags for compiled file header (32-bits) ---
 #define FLAG_IGNORE_CASE (1 << 1)

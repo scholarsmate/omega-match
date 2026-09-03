@@ -30,6 +30,29 @@ HAYSTACK_SIZE_MB = 1024
 add_quiet: bool = False
 
 
+def actual_haystack_size_mb() -> float:
+    """Return the physical haystack size used by the timed command."""
+    return Path(HAYSTACK).stat().st_size / (1024 * 1024)
+
+
+def run_and_drain_stdout(cmd: List[str], accepted_codes=(0,)) -> None:
+    """Run a command and consume all output without using /dev/null.
+
+    GNU grep detects /dev/null and may exit after its first match. A pipe that
+    is fully drained preserves the complete-search behavior needed by this
+    benchmark without retaining potentially large output in memory.
+    """
+    process = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+    )
+    assert process.stdout is not None
+    while process.stdout.read(1024 * 1024):
+        pass
+    returncode = process.wait()
+    if returncode not in accepted_codes:
+        raise subprocess.CalledProcessError(returncode, cmd)
+
+
 def get_binary_paths():
     """Detect the correct binary paths for different build systems.
 
@@ -162,9 +185,12 @@ def run_perf_test(binary: Optional[str], flags: str, show_status: bool = False, 
     cmd: List[str] = [binary, "match"] + extra + flags.split() + [PATTERNS, HAYSTACK]
     start = time.perf_counter()
     try:
-        subprocess.run(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
-        )
+        if add_quiet:
+            subprocess.run(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+            )
+        else:
+            run_and_drain_stdout(cmd)
     except Exception as e:
         if show_status:
             print("\r" + " " * 120, end="\r", flush=True)  # Clear the status line
@@ -173,7 +199,7 @@ def run_perf_test(binary: Optional[str], flags: str, show_status: bool = False, 
     elapsed = time.perf_counter() - start
     if elapsed == 0:
         return "Inf"
-    mb_per_sec = HAYSTACK_SIZE_MB / elapsed
+    mb_per_sec = actual_haystack_size_mb() / elapsed
 
     return f"{mb_per_sec:.2f}"
 
@@ -263,14 +289,12 @@ def run_grep_perf_test(grep_flags: str, test_name: str, show_status: bool = Fals
             return "ERR"
 
         start = time.perf_counter()
-        subprocess.run(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False
-        )
+        run_and_drain_stdout(cmd, accepted_codes=(0, 1))
         elapsed = time.perf_counter() - start
 
         if elapsed == 0:
             return "Inf"
-        mb_per_sec = HAYSTACK_SIZE_MB / elapsed
+        mb_per_sec = actual_haystack_size_mb() / elapsed
         return f"{mb_per_sec:.2f}"
 
     except Exception as e:
@@ -487,6 +511,7 @@ def main():
     add_quiet = bool(args.no_grep)
 
     generate_haystack()
+    print(f"[INFO] Physical haystack size: {actual_haystack_size_mb():.2f} MiB")
 
     # Optional binary overrides (use locals to avoid reassigning module constants)
     debug_bin = DEBUG_BUILD

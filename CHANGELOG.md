@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Byte-accurate scaling benchmark for OmegaMatch, GNU grep, and ripgrep with
+  exact-size corpora, full-output draining, digest validation, raw samples,
+  environment metadata, and native-filesystem work directories.
+- Compiled-layout assertions covering Bloom, hash table, bucket, and short
+  matcher section alignment and extent.
+
+### Changed
+
+- Compiled pattern format bumped to v4. New stores naturally align the mapped
+  Bloom bit array and keyed short-pattern arrays; the loader remains compatible
+  with v1-v3 stores.
+- Three- and four-byte patterns use two-byte prefix filters before binary
+  search, and Bloom misses probe subsequent hashes lazily.
+- Line-start matching uses a parallel single-pass scan with an early boundary
+  branch, avoiding per-line offset storage on newline-dense inputs.
+- PGO anchor workloads now pass the line-start and line-end options they are
+  intended to train.
+- GCC PGO profile transfer copies only `.gcda` counters into the use build,
+  preventing instrumented objects from polluting the optimized build.
+
+### Fixed
+
+- Performance throughput now uses the haystack's physical byte size instead of
+  a hard-coded 1 GiB numerator.
+- GNU grep benchmark output is fully consumed through a pipe, preventing its
+  `/dev/null` early-exit optimization from measuring only the first match.
+- Removed unsupported historical multi-GB/s and extreme grep-ratio claims from
+  rendered documentation and replaced them with reproducible measurements.
+
 ## [0.2.1] - 2025-08-13
 
 ### Changed
@@ -76,7 +109,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Apache 2.0 licensing
 
 ### Performance
-- Achieves 7-9K MB/s throughput on typical workloads
+- Historical release materials reported 7-9K MB/s using the legacy benchmark;
+  see `[Unreleased]` for the corrected methodology and current measurements.
 - Efficient memory usage with memory-mapped compiled patterns
 - Parallel match processing with configurable thread counts
 - Optimized algorithms for different pattern lengths
