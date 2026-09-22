@@ -150,6 +150,23 @@ static void emit_output(char *restrict buffer, size_t *restrict pos,
   }
 }
 
+// Fast unsigned-decimal writer: writes the digits of `v` to `out` and returns
+// the position just past the last digit (no NUL). Equivalent to the prefix
+// snprintf("%zu:") produced, minus the format-string parsing and locale
+// machinery of printf.
+static inline char *write_u64_digits(uint64_t v, char *out) {
+  char tmp[20];
+  int ti = 0;
+  do {
+    tmp[ti++] = (char)('0' + (v % 10));
+    v /= 10;
+  } while (v);
+  while (ti) {
+    *out++ = tmp[--ti];
+  }
+  return out;
+}
+
 // Print match results to given file descriptor or console
 static void print_results_buffered_fd(const omega_match_results_t *results,
                                       const int fd, const int use_console_api,
@@ -162,16 +179,15 @@ static void print_results_buffered_fd(const omega_match_results_t *results,
   size_t pos = 0;
   char prefix[64];
   for (size_t i = 0; i < results->count; ++i) {
-    int n;
+    char *pend = prefix;
+    pend = write_u64_digits(results->matches[i].offset, pend);
+    *pend++ = ':';
     if (show_keys) {
-      n = snprintf(prefix, sizeof(prefix), "%zu:%" PRIu64 ":",
-                   results->matches[i].offset, results->matches[i].key);
-    } else {
-      n = snprintf(prefix, sizeof(prefix), "%zu:",
-                   results->matches[i].offset);
+      pend = write_u64_digits(results->matches[i].key, pend);
+      *pend++ = ':';
     }
-    if (n < 0) continue;
-    emit_output(output_buffer, &pos, prefix, (size_t)n, fd, use_console_api);
+    emit_output(output_buffer, &pos, prefix, (size_t)(pend - prefix), fd,
+                use_console_api);
     emit_output(output_buffer, &pos, results->matches[i].match,
                 results->matches[i].len, fd, use_console_api);
     emit_output(output_buffer, &pos, "\n", 1, fd, use_console_api);
