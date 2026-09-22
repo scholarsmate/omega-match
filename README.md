@@ -134,17 +134,20 @@ python3 scripts/benchmark_scaling.py \
 ```
 
 The checked-in `data/names.txt` contains 29,156 patterns. On an Intel Core
-Ultra 7 165H under Ubuntu 24.04/WSL2, the September 2026 PGO build produced
-the following five-run medians over a warm 256 MiB KJV-derived corpus on the
-native Linux filesystem. These are output-equivalent CLI measurements: every
-tool's complete output was consumed, and byte counts plus SHA-256 digests were
-validated in companion correctness runs.
+Ultra 7 165H running Omarchy 4.0.4 directly on bare metal (Linux 7.2.5, GCC
+16.2), the September 2026 PGO build produced the following five-run medians
+over a warm 256 MiB KJV-derived corpus on the native Linux filesystem. These
+are output-equivalent CLI measurements: every tool's complete output was
+consumed, and byte counts plus SHA-256 digests were validated in companion
+correctness runs. This bare-metal snapshot is not directly comparable to the
+earlier WSL2 measurements; differences between them cannot be attributed to
+OmegaMatch changes alone.
 
-| Mode | OM PGO compile + match | OM PGO reused store | GNU grep 3.11 | ripgrep 15.2 |
+| Mode | OM PGO compile + match | OM PGO reused store | Arch grep 3.12-2 | ripgrep 15.2 |
 |---|---:|---:|---:|---:|
-| longest + no-overlap | 233 MiB/s | 234 MiB/s | 169 MiB/s | 108 MiB/s |
-| line start | 944 MiB/s | 1,113 MiB/s | 23 MiB/s | 227 MiB/s |
-| line end | 497 MiB/s | 525 MiB/s | 26 MiB/s | 49 MiB/s |
+| longest + no-overlap | 447 MiB/s | 461 MiB/s | 360 MiB/s | 262 MiB/s |
+| line start | 2,734 MiB/s | 3,071 MiB/s | 39 MiB/s | 445 MiB/s |
+| line end | 735 MiB/s | 750 MiB/s | 44 MiB/s | 78 MiB/s |
 
 OmegaMatch used eight OpenMP threads. GNU grep is single-threaded; ripgrep was
 given `-j 8`, although a single input file does not necessarily use all eight
@@ -161,10 +164,10 @@ For output-equivalent `longest + no-overlap`, the same harness measured:
 
 | Input | OM compile + match | OM reused store | GNU grep | ripgrep |
 |---:|---:|---:|---:|---:|
-| 4 MiB | 74 MiB/s | 152 MiB/s | 109 MiB/s | 33 MiB/s |
-| 16 MiB | 153 MiB/s | 209 MiB/s | 150 MiB/s | 70 MiB/s |
-| 64 MiB | 216 MiB/s | 228 MiB/s | 167 MiB/s | 103 MiB/s |
-| 256 MiB | 234 MiB/s | 256 MiB/s | 176 MiB/s | 115 MiB/s |
+| 4 MiB | 164 MiB/s | 221 MiB/s | 171 MiB/s | 72 MiB/s |
+| 16 MiB | 343 MiB/s | 446 MiB/s | 294 MiB/s | 164 MiB/s |
+| 64 MiB | 421 MiB/s | 437 MiB/s | 324 MiB/s | 234 MiB/s |
+| 256 MiB | 447 MiB/s | 461 MiB/s | 360 MiB/s | 262 MiB/s |
 
 Compilation is visible on small inputs and amortizes as the haystack grows;
 OmegaMatch did not progressively degrade in this run. Results depend on CPU,
@@ -572,7 +575,7 @@ with Matcher("lines.olm") as matcher:
 with Matcher("patterns.olm") as matcher:
     # Configure for your workload
     matcher.set_threads(8)         # Use all CPU cores
-    matcher.set_chunk_size(4096)   # Larger chunks for big data
+    matcher.set_chunk_size(0)      # Use the tuned 1 MiB default
     
     # Process large data efficiently
     large_data = b"..." * 1000000

@@ -1,5 +1,6 @@
 // matcher.c
 
+#include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -31,7 +32,6 @@
 
 #include <windows.h>
 #else
-#include <limits.h>
 #include <unistd.h>
 #endif
 
@@ -50,6 +50,7 @@ static inline void omp_set_schedule(int kind, int chunk_size) {
 
 #include "omega/details/attr.h"
 #include "omega/details/bloom.h"
+#include "omega/details/hash.h"
 #include "omega/details/common.h"
 #include "omega/details/hash_table.h"
 #include "omega/details/match_vector.h"
@@ -66,6 +67,13 @@ static inline void omp_set_schedule(int kind, int chunk_size) {
 #define PATH_MAX (4096) // POSIX-safe fallback
 #endif
 #endif
+
+// EXP-003: default static-schedule chunk for the match pipeline.
+// Raised from 4096 to 1 MiB positions: with 8 threads on a 256 MiB
+// haystack, 4 KiB chunks meant ~7800 hand-offs of per-chunk bookkeeping
+// (schedule iteration + local statistic merges); 1 MiB cuts that ~256x
+// while keeping tail imbalance under ~0.4% (chunk << work/threads).
+#define OMEGA_DEFAULT_OMP_CHUNK (1048576)
 
 // Opaque matcher structure
 struct omega_list_matcher_struct {
@@ -142,6 +150,138 @@ OLM_ALWAYS_INLINE static int is_at_line_end(const uint8_t *restrict haystack,
   return is_line_end(haystack[end_pos]);
 }
 
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(_MSC_VER)
+#include <emmintrin.h> // SSE2: baseline on x86-64 gcc/clang
+#define OLM_HAVE_SSE2 1
+#endif
+
+// Given a position `pos` that failed the line-start test (haystack[pos-1] is
+// not a line ending), return the next position p >= pos whose preceding byte
+// haystack[p-1] IS a line ending, or `end` if there is none in [pos, end).
+// SSE2: compare 16 bytes at a time for '\n'/'\r', take the lowest set bit of
+// the combined movemask.  The loads stay inside the aligned block containing
+// the search range, so this never faults even on the final partial page of an
+// mmap'd read-only haystack.  Falls back to a scalar loop elsewhere.
+OLM_ALWAYS_INLINE static size_t next_line_start_pos(const uint8_t *restrict h,
+                                                    size_t pos, size_t end) {
+#ifdef OLM_HAVE_SSE2
+  const __m128i nl = _mm_set1_epi8('\n');
+  const __m128i cr = _mm_set1_epi8('\r');
+  // SIMD blocks must lie fully inside [0, end) so a 16-byte load can
+  // never touch the page past the end of an mmap'd read-only buffer.
+  const size_t simd_limit = (end >= 16) ? (end & ~(size_t)15) : 0;
+  while (pos < end) {
+    if (pos >= simd_limit) { // < 16 bytes left: scalar tail
+      while (pos < end && !is_line_end(h[pos - 1])) {
+        ++pos;
+      }
+      return pos;
+    }
+    const size_t blk = pos & ~(size_t)15; // blk + 16 <= simd_limit <= end
+    // Unaligned load: callers may pass window-relative pointers that are not
+    // 16-byte aligned; the block is fully inside [0, end) so this is safe.
+    const __m128i v = _mm_loadu_si128((const __m128i *)(h + blk));
+    const unsigned mask = (unsigned)(_mm_movemask_epi8(_mm_cmpeq_epi8(v, nl)) |
+                                     _mm_movemask_epi8(_mm_cmpeq_epi8(v, cr)));
+    // Bits of the block before pos are irrelevant: drop them.
+    const unsigned rel = (unsigned)(pos - blk);
+    const unsigned shifted = (rel >= 16) ? 0u : (mask >> rel);
+    if (shifted) {
+      const size_t cand = blk + rel + (size_t)__builtin_ctz(shifted);
+      // cand is the offset of a line-ending byte at >= pos; the following
+      // position is cand+1.
+      if (cand + 1 < end) {
+        return cand + 1;
+      }
+      return end;
+    }
+    pos = blk + 16;
+  }
+  return end;
+#else
+  while (pos < end && !is_line_end(h[pos - 1])) {
+    ++pos;
+  }
+  return pos;
+#endif
+}
+
+// Classify 16 bytes as word characters ([A-Za-z0-9_]) exactly like _wordmap.
+// Signed byte compares are safe: any byte >= 0x80 is negative and fails all
+// range tests; (v|0x20) keeps bit7 set so high bytes cannot alias into the
+// letter range.
+#ifdef OLM_HAVE_SSE2
+OLM_ALWAYS_INLINE static unsigned word_class_mask(const __m128i v) {
+  const __m128i lower = _mm_or_si128(v, _mm_set1_epi8(0x20));
+  const __m128i alpha = _mm_and_si128(
+      _mm_cmpgt_epi8(lower, _mm_set1_epi8(0x60)),
+      _mm_cmplt_epi8(lower, _mm_set1_epi8(0x7B)));
+  const __m128i digit = _mm_and_si128(
+      _mm_cmpgt_epi8(v, _mm_set1_epi8(0x2F)),
+      _mm_cmplt_epi8(v, _mm_set1_epi8(0x3A)));
+  const __m128i word = _mm_or_si128(
+      _mm_or_si128(alpha, digit), _mm_cmpeq_epi8(v, _mm_set1_epi8('_')));
+  return (unsigned)_mm_movemask_epi8(word);
+}
+#endif
+
+// Given a position `pos` > 0 that failed the in-loop word-boundary test,
+// return the first p in (pos, end) where IS_WORD(h[p]) != IS_WORD(h[p-1]),
+// or `end` if there is none.  (Callers handle pos == 0 separately: the main
+// loop treats a chunk-local position 0 as a candidate regardless of class,
+// mirroring its `pos > 0` guard.)
+// SSE2: classify 16 bytes per iteration; boundaries within the block are
+// mask XOR (mask<<1 | carry-of-previous-block's-last-byte).  Loads stay
+// inside the aligned block fully contained in [0, end), same page-safety
+// argument as next_line_start_pos.  Falls back to a scalar loop elsewhere.
+// NOTE: deliberately NOT always-inline — inlining the SIMD block into the
+// shared scan loop bloated the hot loop for non-wb runs (~+20ms measured on
+// the plain longest-no-overlap control); a call only happens on failed
+// positions, which are a minority anyway.
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
+static size_t
+next_word_boundary_pos(const uint8_t *restrict h, size_t pos, size_t end) {
+#ifdef OLM_HAVE_SSE2
+  const size_t simd_limit = (end >= 16) ? (end & ~(size_t)15) : 0;
+  while (pos < end) {
+    if (pos >= simd_limit) { // < 16 bytes left: scalar tail
+      while (pos < end) {
+        const bool pw = (pos > 0) ? (IS_WORD(h[pos - 1]) ? true : false)
+                                  : false;
+        if ((IS_WORD(h[pos]) ? true : false) != pw) {
+          return pos;
+        }
+        ++pos;
+      }
+      return end;
+    }
+    const size_t blk = pos & ~(size_t)15; // blk + 16 <= end
+    const __m128i v = _mm_loadu_si128((const __m128i *)(h + blk));
+    const unsigned m = word_class_mask(v);
+    const unsigned carry = (blk > 0 && IS_WORD(h[blk - 1])) ? 1u : 0u;
+    const unsigned b = m ^ ((m << 1) | carry); // bit i: boundary at blk+i
+    const unsigned rel = (unsigned)(pos - blk);
+    const unsigned shifted = (rel >= 16) ? 0u : (b >> rel);
+    if (shifted) {
+      return blk + rel + (size_t)__builtin_ctz(shifted); // <= blk+15 < end
+    }
+    pos = blk + 16;
+  }
+  return end;
+#else
+  while (pos < end) {
+    if ((IS_WORD(h[pos]) ? true : false) !=
+        (IS_WORD(h[pos - 1]) ? true : false)) {
+      return pos;
+    }
+    ++pos;
+  }
+  return end;
+#endif
+}
+
 // --- OMP Functions ---
 
 // Set number of threads for matching on a specific matcher
@@ -170,13 +310,17 @@ int omega_matcher_get_num_threads(
 int omega_matcher_set_chunk_size(omega_list_matcher_t *restrict matcher,
                                  int chunk) {
   if (chunk == 0) {
-    chunk = 4096; // Default chunk size
+    chunk = OMEGA_DEFAULT_OMP_CHUNK; // Default chunk size
   } else if (chunk < 1) {
     return -1; // invalid chunk size
   }
   // Ensure chunk size is a power of two
   else if ((chunk & (chunk - 1)) != 0) {
-    chunk = (int)next_power_of_two(chunk);
+    const uint32_t rounded = next_power_of_two((uint32_t)chunk);
+    if (rounded > (uint32_t)INT_MAX) {
+      return -1;
+    }
+    chunk = (int)rounded;
   }
   matcher->omp_chunk_size = chunk;
   return 0;
@@ -727,7 +871,9 @@ finalize_match_results(match_vector_t **restrict thread_matches,
   // Compute total to preallocate output buffer
   size_t total = 0;
   for (size_t i = 0; i < num_chunks; ++i) {
-    total += thread_matches[i]->count;
+    if (thread_matches[i]) {
+      total += thread_matches[i]->count;
+    }
   }
 
   // K-way merge state: one cursor per chunk
@@ -739,7 +885,7 @@ finalize_match_results(match_vector_t **restrict thread_matches,
   match_vector_t *single = NULL; // the only non-empty vector when active == 1
   for (size_t i = 0; i < num_chunks; ++i) {
     match_vector_t *v = thread_matches[i];
-    if (v->count > 0) {
+    if (v && v->count > 0) {
       runs[active].arr = v->data;
       runs[active].len = v->count;
       runs[active].idx = 0;
@@ -753,8 +899,10 @@ finalize_match_results(match_vector_t **restrict thread_matches,
   if (active == 0) {
     // Free inputs and return empty result
     for (size_t i = 0; i < num_chunks; ++i) {
-      free_match_vector(thread_matches[i]);
-      free(thread_matches[i]);
+      if (thread_matches[i]) {
+        free_match_vector(thread_matches[i]);
+        free(thread_matches[i]);
+      }
     }
     free(thread_matches);
     free(runs);
@@ -803,8 +951,10 @@ finalize_match_results(match_vector_t **restrict thread_matches,
     out->matches = single->data;
     single->data = NULL; // ownership transferred to the results
     for (size_t i = 0; i < num_chunks; ++i) {
-      free_match_vector(thread_matches[i]);
-      free(thread_matches[i]);
+      if (thread_matches[i]) {
+        free_match_vector(thread_matches[i]);
+        free(thread_matches[i]);
+      }
     }
     free(thread_matches);
     free(runs);
@@ -876,8 +1026,10 @@ finalize_match_results(match_vector_t **restrict thread_matches,
 
   // Free inputs
   for (size_t i = 0; i < num_chunks; ++i) {
-    free_match_vector(thread_matches[i]);
-    free(thread_matches[i]);
+    if (thread_matches[i]) {
+      free_match_vector(thread_matches[i]);
+      free(thread_matches[i]);
+    }
   }
   free(thread_matches);
   free(heap);
@@ -1015,6 +1167,33 @@ short_matcher_index4_fast(const short_matcher_t *restrict sm,
   return sm_find_index(sm->arr4, sm->len4, key);
 }
 
+// EXP-006: bloom_filter_query inlined into matcher.c's translation unit.
+// bloom.c is a separate TU (LTO off), so every candidate position in the hot
+// scan loop paid an out-of-line PLT call into bloom_filter_query. This is a
+// byte-for-byte copy of that function's body, marked always_inline; the
+// out-of-line definition in bloom.c stays untouched for other callers.
+static OLM_ALWAYS_INLINE int
+bloom_filter_query_inline(const bloom_filter_t *restrict bf,
+                          const uint32_t key) {
+  const uint32_t h1 = fast_gram_hash(key);
+  const uint32_t mask = bf->bit_size - 1;
+  const uint64_t *restrict bits = bf->bits;
+
+  uint32_t bit_pos = h1 & mask;
+  if ((bits[bit_pos >> 6] & (1ULL << (bit_pos & 63))) == 0) {
+    return 0;
+  }
+
+  const uint32_t h2 = key * 0x9e3779b1U; // GOLDEN_RATIO_32
+  bit_pos = (bit_pos + (h2 & mask)) & mask;
+  if ((bits[bit_pos >> 6] & (1ULL << (bit_pos & 63))) == 0) {
+    return 0;
+  }
+
+  bit_pos = (bit_pos + (h2 & mask)) & mask;
+  return (bits[bit_pos >> 6] & (1ULL << (bit_pos & 63))) != 0;
+}
+
 
 
 // Core case-sensitive matcher with performance optimizations
@@ -1034,7 +1213,7 @@ core_match(const omega_list_matcher_t *restrict matcher,
 #if _OPENMP >= 200805
   omp_set_schedule(omp_sched_static, matcher->omp_chunk_size > 0
                                          ? matcher->omp_chunk_size
-                                         : 4096);
+                                         : OMEGA_DEFAULT_OMP_CHUNK);
 #endif
 #endif
 
@@ -1045,12 +1224,12 @@ core_match(const omega_list_matcher_t *restrict matcher,
   uint64_t total_filtered = 0;
   uint64_t total_comparisons = 0;
 
-  const int max_threads = omp_get_max_threads();
   match_vector_t **thread_matches =
       calloc(num_threads, sizeof(match_vector_t *));
   if (unlikely(!thread_matches)) {
     ABORT("calloc thread_matches"); // OOM
   }
+
 
   // Hoist matcher fields and create local copies to improve cache locality
   const uint32_t table_mask = matcher->header->table_size - 1;
@@ -1091,9 +1270,20 @@ core_match(const omega_list_matcher_t *restrict matcher,
   // input once with an early boundary branch below: materializing every line
   // start could require about eight bytes of offsets per input byte for
   // newline-dense data.
+  //
+  // EXP-004: the same reasoning applies to word boundaries. The materialize
+  // path below ran two SERIAL byte-at-a-time passes (count, then fill) and
+  // stored up to 8 bytes of offsets per input byte; on a typical text corpus
+  // ~40% of positions are boundaries, so it allocated and wrote ~3.2x the
+  // haystack size serially before the parallel scan even started. The
+  // single-pass loop already gates every position with the identical
+  // word-boundary test at negligible cost, so the candidate path is now
+  // disabled for word boundaries as well (kept for line_start==false only
+  // through the flag below; no flag enables it anymore).
+  const int use_wb_candidate_path = 0;
   size_t *candidate_pos = NULL;
   size_t candidate_cnt = 0;
-  if (word_boundary && !line_start) {
+  if (use_wb_candidate_path && word_boundary && !line_start) {
     // First pass: count boundaries
     size_t cnt = 0;
     uint8_t prev_is_word = 0;
@@ -1137,6 +1327,9 @@ core_match(const omega_list_matcher_t *restrict matcher,
         0;
 #endif
     match_vector_t *local = malloc(sizeof(*local));
+    if (unlikely(!local)) {
+      ABORT("malloc thread_matches entry");
+    }
     init_match_vector(local);
     thread_matches[tid] = local;
     const ptrdiff_t hsize = (ptrdiff_t)haystack_size;
@@ -1156,7 +1349,7 @@ core_match(const omega_list_matcher_t *restrict matcher,
         if (largest >= 5 && remaining >= 4) {
           ++total_attempts;
           const uint32_t cand = pack_gram(h_ptr);
-          if (unlikely(!bloom_filter_query(bf, cand))) {
+          if (unlikely(!bloom_filter_query_inline(bf, cand))) {
             ++total_filtered;
           } else {
             uint32_t slot_offset;
@@ -1252,24 +1445,74 @@ core_match(const omega_list_matcher_t *restrict matcher,
         }
       }
     } else {
-      ptrdiff_t pos;
+      // OpenMP worksharing loop indices cannot be modified in the loop body.
+      // Schedule position-sized chunks explicitly, then let a private cursor
+      // fast-forward within each chunk. schedule(static, 1) on these chunk
+      // descriptors preserves the previous static position distribution.
+      ptrdiff_t scan_chunk_size =
+          (ptrdiff_t)(matcher->omp_chunk_size > 0
+                          ? matcher->omp_chunk_size
+                          : OMEGA_DEFAULT_OMP_CHUNK);
+      // Treat the configured chunk as a maximum. For inputs smaller than one
+      // chunk per requested worker, split more finely so the tuned 1 MiB
+      // default does not force small and medium inputs onto one worker.
+      if (hsize > 0 && num_threads > 1) {
+        const ptrdiff_t per_thread =
+            hsize / num_threads + (hsize % num_threads != 0);
+        if (scan_chunk_size > per_thread) {
+          scan_chunk_size = per_thread;
+        }
+      }
+      const ptrdiff_t scan_chunk_count =
+          hsize / scan_chunk_size + (hsize % scan_chunk_size != 0);
+      ptrdiff_t chunk_index;
 #ifdef OMEGA_MATCH_USE_OPENMP
-#pragma omp for schedule(runtime)
+#pragma omp for schedule(static, 1)
 #endif
-      for (pos = 0; pos < hsize; ++pos) {
+      for (chunk_index = 0; chunk_index < scan_chunk_count; ++chunk_index) {
+        const ptrdiff_t chunk_begin = chunk_index * scan_chunk_size;
+        const ptrdiff_t chunk_remaining = hsize - chunk_begin;
+        const ptrdiff_t chunk_end =
+            chunk_remaining > scan_chunk_size
+                ? chunk_begin + scan_chunk_size
+                : hsize;
+        ptrdiff_t pos = chunk_begin;
+
+        while (pos < chunk_end) {
         // Match only byte zero and bytes immediately following a line ending.
         // This single parallel pass keeps line-start auxiliary memory constant
-        // even when nearly every byte is a newline.
+        // even when nearly every byte is a newline.  When the current position
+        // fails the test, SSE2-skips directly to the next line-start instead
+        // of re-testing every interior byte.
         if (line_start && pos > 0 && !is_line_end(haystack[pos - 1])) {
+          const size_t n =
+              next_line_start_pos(haystack, (size_t)pos, (size_t)chunk_end);
+          pos = (ptrdiff_t)n;
           continue;
         }
 
-        // Word boundary optimization: skip non-boundary positions early
+        // Word boundary optimization: skip non-boundary positions early.
+        // When the test fails, SSE2-skips directly to the next word
+        // boundary instead of re-testing every interior byte (EXP-005).
+        // In combined line-start+wb mode the two skips alternate; each
+        // skipped region provably lacks one of the two required
+        // predicates, so no valid match position is ever jumped over.
         const uint8_t curr_char = haystack[pos];
         if (word_boundary) {
           const bool curr_is_word = IS_WORD(curr_char);
           const bool prev_is_word = (pos > 0) ? IS_WORD(haystack[pos - 1]) : false;
           if (curr_is_word == prev_is_word) {
+            // SSE2-skip to the next word boundary (EXP-005) instead of
+            // re-testing every interior byte. At haystack position zero a
+            // non-word byte correctly fails the boundary test; advance it
+            // directly because the helper requires pos > 0.
+            if (pos > 0) {
+              const size_t n = next_word_boundary_pos(
+                  haystack, (size_t)pos + 1, (size_t)chunk_end);
+              pos = (ptrdiff_t)n;
+            } else {
+              ++pos;
+            }
             continue;
           }
         }
@@ -1281,9 +1524,10 @@ core_match(const omega_list_matcher_t *restrict matcher,
       if (largest >= 5 && remaining >= 4) {
         ++total_attempts;
         const uint32_t cand = pack_gram(h_ptr);
-        
-        // Use the official bloom filter check which implements 3-hash bloom filter
-        if (unlikely(!bloom_filter_query(bf, cand))) {
+
+        // EXP-006: inlined copy of bloom_filter_query (see definition
+        // above); the out-of-line call cost lands on every scan position.
+        if (unlikely(!bloom_filter_query_inline(bf, cand))) {
           ++total_filtered;
         } else {
           uint32_t slot_offset;
@@ -1393,12 +1637,14 @@ core_match(const omega_list_matcher_t *restrict matcher,
           }
         }
         }
+        ++pos;
+        }
       }
     }
   }
 
   omega_match_results_t *results = finalize_match_results(
-      thread_matches, max_threads, no_overlap, longest_only);
+      thread_matches, (size_t)num_threads, no_overlap, longest_only);
 
   if (candidate_pos) {
     free(candidate_pos);

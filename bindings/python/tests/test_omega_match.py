@@ -299,7 +299,7 @@ def test_set_threads(tmp_path):
         m.set_threads(0)
         assert m.get_threads() > 0
         m.set_chunk_size(0)
-        assert m.get_chunk_size() == 4096
+        assert m.get_chunk_size() == 1024 * 1024
 
         with pytest.raises(ValueError):
             m.set_threads(-1)
