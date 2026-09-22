@@ -67,6 +67,13 @@ static inline void omp_set_schedule(int kind, int chunk_size) {
 #endif
 #endif
 
+// EXP-003: default static-schedule chunk for the match pipeline.
+// Raised from 4096 to 1 MiB positions: with 8 threads on a 256 MiB
+// haystack, 4 KiB chunks meant ~7800 hand-offs of per-chunk bookkeeping
+// (schedule iteration + local statistic merges); 1 MiB cuts that ~256x
+// while keeping tail imbalance under ~0.4% (chunk << work/threads).
+#define OMEGA_DEFAULT_OMP_CHUNK (1048576)
+
 // Opaque matcher structure
 struct omega_list_matcher_struct {
   uint8_t *mapped_file_base;
@@ -226,7 +233,7 @@ int omega_matcher_get_num_threads(
 int omega_matcher_set_chunk_size(omega_list_matcher_t *restrict matcher,
                                  int chunk) {
   if (chunk == 0) {
-    chunk = 4096; // Default chunk size
+    chunk = OMEGA_DEFAULT_OMP_CHUNK; // Default chunk size
   } else if (chunk < 1) {
     return -1; // invalid chunk size
   }
@@ -1090,7 +1097,7 @@ core_match(const omega_list_matcher_t *restrict matcher,
 #if _OPENMP >= 200805
   omp_set_schedule(omp_sched_static, matcher->omp_chunk_size > 0
                                          ? matcher->omp_chunk_size
-                                         : 4096);
+                                         : OMEGA_DEFAULT_OMP_CHUNK);
 #endif
 #endif
 

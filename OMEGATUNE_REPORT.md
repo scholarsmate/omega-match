@@ -18,10 +18,10 @@ first, performs exactly ONE bounded experiment, appends the result, and exits.
 
 - Current accepted branch: `perf/omega-tune-2026-09`
 - Current HEAD at campaign start: 407f128 (same as origin/main)
-- Current accepted baseline: EXP-002 (SSE2 line-start skip) — see numbers
-  under EXP-001 and EXP-002 entries below.
+- Current accepted baseline: EXP-003 (default OMP chunk 4096 -> 1 MiB) —
+  see numbers under EXP-001, EXP-002 and EXP-003 entries below.
 - Session log: EXP-001 accepted (2026-09-21/22), EXP-002 accepted
-  (2026-09-22).
+  (2026-09-22), EXP-003 accepted (2026-09-22).
 
 ## Environment (fixed for the campaign)
 
@@ -157,6 +157,51 @@ New accepted baseline (post-EXP-002, wall medians, `--threads 8`):
 - line-start longest-no-overlap 64 MiB:  quiet ≈ 16 ms
 - longest-no-overlap 256 MiB: ≈ 578 ms (unchanged; EXP-001 baseline holds)
 
+### EXP-003 — default OMP static chunk 4096 → 1 MiB — ACCEPTED
+
+Hypothesis (recommended item 3): with `omp_sched_static` and chunk=4096
+positions, an 8-thread 256 MiB run iterates ~7800 schedule chunks per
+thread; per-chunk bookkeeping (schedule iteration + local statistic
+merge) is measurable. An earlier 3-rep sweep (4K/16K/64K/256K/1M,
+`/tmp/omega-match-scaling/chunk-probe.tsv`) suggested 1 MiB ~10–19 ms
+faster than 4096 on the longest-no-overlap quiet case.
+
+Change (smallest isolated): `omega_match/src/matcher.c` — introduce
+`OMEGA_DEFAULT_OMP_CHUNK (1048576)` and use it at both default sites
+(`omega_matcher_set_chunk_size(…, 0)` fallback and the
+`omp_set_schedule(... : 4096)` fallback). Explicit `--chunk-size`
+behavior unchanged; value still rounded up to power of two.
+
+Correctness: CTest 18/18 pass (`-E python_pytest`); byte-identical
+match output (sha256) between chunk 4096, new default, and 64K@4threads
+across 4 modes (longest-no-overlap 4,067,333 lines; plain 7,316,720;
+line-start-longest 1,042,604; ignore-case).
+
+Benchmark (quiet, `--threads 8`, longest-no-overlap 256 MiB base corpus,
+interleaved pairs; artifacts `chunk-ab.tsv` 9 reps, `chunk-ab2.tsv` 15,
+`chunk-ab3.tsv` 12, `exp003-final.tsv` 12 same-binary default-vs-explicit-4096):
+- Pooled paired sample n=48: median 4096 = 479.5 ms, median 1 MiB =
+  471.5 ms; median delta −10.0 ms, mean −6.8 ms (95% CI [−11.0, −2.6],
+  t = −3.22); 1 MiB faster in 34/48 pairs, sign test one-sided p = 0.0028.
+- Same-binary check (`exp003-final.tsv`, isolates default change from
+  binary drift): median delta −8.0 ms, 8/12 wins. Consistent with pooled.
+- Controls (8 interleaved reps, explicit 4096 vs 1M on same binary):
+  line-start longest-no-overlap 256 MiB quiet 54.0 → 51.5 ms (−1.5 ms,
+  7/8 wins — small but same direction); longest-no-overlap 64 MiB
+  124.5 → 124.0 ms (neutral, within noise). No case made slower.
+
+Caveats: single-session measurement; the effect (~1.4%) is within the
+scale of run-to-run environment drift, so acceptance rests on the pooled
+sign test and the same-binary subset rather than any single A/B. The
+earlier 10–19 ms probe figure was optimistic; true effect ≈ −7 to −10 ms.
+
+New accepted baseline (post-EXP-003, wall medians, `--threads 8`, quiet):
+- longest-no-overlap 256 MiB: ≈ 471 ms quiet (this session's 1 MiB medians;
+  previous EXP-002-era quiet figures were taken under different ambient
+  load — compare only within same-session A/B pairs from here on)
+- line-start longest-no-overlap 256 MiB: ≈ 51.5 ms quiet (54.0 at chunk 4096)
+- longest-no-overlap 64 MiB: ≈ 124 ms quiet
+
 ## Rejected / inconclusive experiments
 
 (none yet)
@@ -170,6 +215,14 @@ New accepted baseline (post-EXP-002, wall medians, `--threads 8`):
 - Python venv creation + `pip install pytest` fails in this sandbox (exit
   -1). CTest (`-E python_pytest`, 18 tests) + byte-identical-output diffs
   are the working correctness gate.
+- `olm compile` fails with "Error: Failed to compile patterns …" for ANY
+  input on this host in this sandbox (even 3-pattern files, fresh output
+  paths, -v shows nothing more) — reproducible at EXP-003 session with the
+  EXP-002-lineage build. Do not burn a session trying to build new .olm
+  corpora via the CLI; reuse the prebuilt ones in /tmp/omega-match-scaling
+  (patterns-base.olm, patterns-release.olm). If new corpora are truly
+  needed, investigate the compiler path separately (suspect OMP_NUM_THREADS
+  22-core default or sandbox write behavior inside omega_list_matcher_compile).
 
 ## Recommended next experiments
 
@@ -183,10 +236,10 @@ New accepted baseline (post-EXP-002, wall medians, `--threads 8`):
 2. Output-buffer size / write granularity in `print_results_buffered_fd`
    (OUTPUT_BUFFER_SIZE currently 64 KiB — try 256 KiB/1 MiB; few writes vs
    many). Cheap, isolated.
-3. Chunk-size tuning sweep in the match pipeline (`omp_chunk_size`,
-   `matcher->omp_chunk_size` default 4096 static schedule) for the 256 MiB
-   longest case at 8 threads; the +7 ms control wobble in EXP-002 hints at
-   static-schedule load imbalance.
+3. ~~Chunk-size tuning sweep in the match pipeline~~ — DONE as EXP-003
+   (accepted: default chunk 4096 → 1 MiB, −7 to −10 ms on 256 MiB longest
+   quiet, pooled n=48 p=0.003). Intermediate sizes (16K–256K) were within
+   noise of 4096 in the probe sweep; no further chunk tuning worth doing.
 4. Bloom-filter probe layout (`omega_match/src/bloom.c` ~lines 30–95,
    `bloom_filter_add`/`bloom_filter_query`; 3 probes into one bitmap per
    `omega/details/bloom.h`): consider a blocked/squarized layout to reduce
