@@ -205,6 +205,77 @@ OLM_ALWAYS_INLINE static size_t next_line_start_pos(const uint8_t *restrict h,
 #endif
 }
 
+// Classify 16 bytes as word characters ([A-Za-z0-9_]) exactly like _wordmap.
+// Signed byte compares are safe: any byte >= 0x80 is negative and fails all
+// range tests; (v|0x20) keeps bit7 set so high bytes cannot alias into the
+// letter range.
+OLM_ALWAYS_INLINE static unsigned word_class_mask(const __m128i v) {
+  const __m128i lower = _mm_or_si128(v, _mm_set1_epi8(0x20));
+  const __m128i alpha = _mm_and_si128(
+      _mm_cmpgt_epi8(lower, _mm_set1_epi8(0x60)),
+      _mm_cmplt_epi8(lower, _mm_set1_epi8(0x7B)));
+  const __m128i digit = _mm_and_si128(
+      _mm_cmpgt_epi8(v, _mm_set1_epi8(0x2F)),
+      _mm_cmplt_epi8(v, _mm_set1_epi8(0x3A)));
+  const __m128i word = _mm_or_si128(
+      _mm_or_si128(alpha, digit), _mm_cmpeq_epi8(v, _mm_set1_epi8('_')));
+  return (unsigned)_mm_movemask_epi8(word);
+}
+
+// Given a position `pos` > 0 that failed the in-loop word-boundary test,
+// return the first p in (pos, end) where IS_WORD(h[p]) != IS_WORD(h[p-1]),
+// or `end` if there is none.  (Callers handle pos == 0 separately: the main
+// loop treats a chunk-local position 0 as a candidate regardless of class,
+// mirroring its `pos > 0` guard.)
+// SSE2: classify 16 bytes per iteration; boundaries within the block are
+// mask XOR (mask<<1 | carry-of-previous-block's-last-byte).  Loads stay
+// inside the aligned block fully contained in [0, end), same page-safety
+// argument as next_line_start_pos.  Falls back to a scalar loop elsewhere.
+// NOTE: deliberately NOT always-inline — inlining the SIMD block into the
+// shared scan loop bloated the hot loop for non-wb runs (~+20ms measured on
+// the plain longest-no-overlap control); a call only happens on failed
+// positions, which are a minority anyway.
+__attribute__((noinline)) static size_t
+next_word_boundary_pos(const uint8_t *restrict h, size_t pos, size_t end) {
+#ifdef OLM_HAVE_SSE2
+  const size_t simd_limit = (end >= 16) ? (end & ~(size_t)15) : 0;
+  while (pos < end) {
+    if (pos >= simd_limit) { // < 16 bytes left: scalar tail
+      while (pos < end) {
+        const bool pw = (pos > 0) ? (IS_WORD(h[pos - 1]) ? true : false)
+                                  : false;
+        if ((IS_WORD(h[pos]) ? true : false) != pw) {
+          return pos;
+        }
+        ++pos;
+      }
+      return end;
+    }
+    const size_t blk = pos & ~(size_t)15; // blk + 16 <= end
+    const __m128i v = _mm_loadu_si128((const __m128i *)(h + blk));
+    const unsigned m = word_class_mask(v);
+    const unsigned carry = (blk > 0 && IS_WORD(h[blk - 1])) ? 1u : 0u;
+    const unsigned b = m ^ ((m << 1) | carry); // bit i: boundary at blk+i
+    const unsigned rel = (unsigned)(pos - blk);
+    const unsigned shifted = (rel >= 16) ? 0u : (b >> rel);
+    if (shifted) {
+      return blk + rel + (size_t)__builtin_ctz(shifted); // <= blk+15 < end
+    }
+    pos = blk + 16;
+  }
+  return end;
+#else
+  while (pos < end) {
+    if ((IS_WORD(h[pos]) ? true : false) !=
+        (IS_WORD(h[pos - 1]) ? true : false)) {
+      return pos;
+    }
+    ++pos;
+  }
+  return end;
+#endif
+}
+
 // --- OMP Functions ---
 
 // Set number of threads for matching on a specific matcher
@@ -1343,12 +1414,26 @@ core_match(const omega_list_matcher_t *restrict matcher,
           continue;
         }
 
-        // Word boundary optimization: skip non-boundary positions early
+        // Word boundary optimization: skip non-boundary positions early.
+        // When the test fails, SSE2-skips directly to the next word
+        // boundary instead of re-testing every interior byte (EXP-005).
+        // In combined line-start+wb mode the two skips alternate; each
+        // skipped region provably lacks one of the two required
+        // predicates, so no valid match position is ever jumped over.
         const uint8_t curr_char = haystack[pos];
         if (word_boundary) {
           const bool curr_is_word = IS_WORD(curr_char);
           const bool prev_is_word = (pos > 0) ? IS_WORD(haystack[pos - 1]) : false;
           if (curr_is_word == prev_is_word) {
+            // SSE2-skip to the next word boundary (EXP-005) instead of
+            // re-testing every interior byte.  pos == 0 is chunk-local:
+            // keep it as a candidate (mirrors the prev_is_word=false test),
+            // so only skip when pos > 0.
+            if (pos > 0) {
+              const size_t n = next_word_boundary_pos(
+                  haystack, (size_t)pos + 1, (size_t)hsize);
+              pos = (ptrdiff_t)n - 1; // loop ++pos lands on n (or exits)
+            }
             continue;
           }
         }

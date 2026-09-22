@@ -18,11 +18,11 @@ first, performs exactly ONE bounded experiment, appends the result, and exits.
 
 - Current accepted branch: `perf/omega-tune-2026-09`
 - Current HEAD at campaign start: 407f128 (same as origin/main)
-- Current accepted baseline: EXP-004 (word-boundary candidate
-  materialization removed) — see EXP-004 entry under accepted experiments.
+- Current accepted baseline: EXP-005 (SSE2 word-boundary skip in the
+  single-pass scan) — see EXP-005 entry under accepted experiments.
 - Session log: EXP-001 accepted (2026-09-21/22), EXP-002 accepted
   (2026-09-22), EXP-003 accepted (2026-09-22), EXP-004 accepted
-  (2026-09-22).
+  (2026-09-22), EXP-005 accepted (2026-09-22).
 
 ## Environment (fixed for the campaign)
 
@@ -248,6 +248,64 @@ New accepted baseline (post-EXP-004, wall medians, `--threads 8`, quiet,
   note ambient-load caveat from EXP-003 — compare only within same-session
   A/B pairs)
 
+### EXP-005 — SSE2 skip to next word boundary in the in-loop gate — ACCEPTED
+
+Hypothesis (recommended item 0 after EXP-004): with the materialization
+path dead, `--word-boundary` runs the in-loop gate byte-at-a-time — every
+interior word byte is re-tested individually before the bloom probe. On the
+base corpus ~104M of 268M positions are boundaries, so ~160M interior
+positions pay a scalar test each. An SSE2 skip that jumps directly from a
+failed position to the next class-change byte should remove that scalar
+walk (EXP-002-style, for word boundaries instead of newlines).
+
+Implementation (+78/−1 lines in `omega_match/src/matcher.c`): new
+`word_class_mask()` (SSE2: classify 16 bytes as `[A-Za-z0-9_]` with signed
+compares; `(v|0x20)` cannot alias bytes ≥0x80 into the letter range) and
+`next_word_boundary_pos()` (mask XOR `mask<<1|carry` gives in-block
+boundary bits; `__builtin_ctz` picks the first ≥ pos; scalar tail past the
+last full aligned block; page-safety argument identical to EXP-002's
+`next_line_start_pos` — loads stay inside aligned blocks fully contained
+in [0, end)). The failed-branch of the wb gate calls it and rewinds `pos`
+by 1 so the loop's `++pos` lands on the next boundary. `pos == 0`
+(chunk-local) is kept as a candidate, mirroring the `pos > 0` guard. In
+combined line-start+wb mode the two skips alternate; each skipped region
+provably lacks one of the two predicates, so no valid match is jumped.
+
+Variant history (important layout lesson):
+- `exp005` (helper `OLM_ALWAYS_INLINE`): wb 378→363 ms, BUT the plain
+  control regressed +20 ms (+3.9%, n=18 pooled, 18/18 pairs) — inlining
+  the SIMD block bloated the shared scan loop for non-wb runs where the
+  branch is never taken.
+- `exp005b` (helper `__attribute__((noinline))`): control regression gone
+  (paired mean −3.9 ms, 5/10 — noise), wb win retained. ACCEPTED form.
+  Lesson: SIMD skip helpers called off the hottest path must stay
+  noinline; always-inline them poisons adjacent-loop code layout.
+
+Correctness:
+- CTest 18/18 pass (`-E python_pytest`) for both exp005 and exp005b.
+- 88-combo edge-case differential (tiny punct/word corpus x flag combos vs
+  head binary): 0 mismatches.
+- Byte-identity vs head binary on 256 MiB corpus across 7 flag combos
+  (wb, wb-lno, wb-ic, wb-ls-lno, lno, ls, plain): 7/7 OK, exit codes equal.
+
+Benchmark (alternating-order A/B vs head binary, `--threads 8`, quiet,
+256 MiB base corpus; artifacts `exp005b-ab.tsv` n=10 + `exp005-final.tsv`
+n=12, pooled):
+- word-boundary: head med 365 ms (n=22, 349-383) vs exp med 353 ms
+  (n=22, 328-366): −12 ms (−3.3%), 12/12 paired-rep wins in exp005-final,
+  10/10 in the wb block of exp005b-ab.
+- control longest-no-overlap: head med 504 vs exp med 513 raw, but paired
+  mean −3.9 ms with 5/10 wins — ranges overlap heavily; treated as no
+  regression (the +20 ms inline-variant regression is definitively gone).
+Modest win: the skip helps but wb is now close to memory-bandwidth-bound;
+most gate savings were already captured by EXP-004.
+
+New accepted baseline (post-EXP-005, wall medians, `--threads 8`, quiet,
+256 MiB base corpus):
+- word-boundary longest-no-overlap: ≈ 353 ms (was ≈ 366 ms)
+- longest-no-overlap: ≈ 504 ms quiet (unchanged)
+- line-start: ≈ 53-79 ms (EXP-002 territory; unchanged)
+
 ## Rejected / inconclusive experiments
 
 (none yet)
@@ -272,15 +330,12 @@ New accepted baseline (post-EXP-004, wall medians, `--threads 8`, quiet,
 
 ## Recommended next experiments
 
-0. Word-boundary follow-up (from EXP-004): after the fix, wb
-   longest-no-overlap is 366 ms — FASTER than the plain scan (≈471 ms),
-   because the in-loop gate cuts bloom attempts from 268M to 104M. The
-   gate itself is now the hot path for wb: a vectorized (SSE2/AVX2)
-   word-class comparison pass (EXP-002-style skip directly to the next
-   boundary instead of testing every interior byte) could plausibly bring
-   wb toward the line-start profile (~50-80 ms territory). Also the dead
-   `use_wb_candidate_path`-guarded code in matcher.c can be deleted once
-   EXP-004 is considered settled.
+0. ~~Word-boundary follow-up~~ DONE as EXP-005 (accepted, −3.3% on wb;
+   wb now ≈353 ms and close to memory-bandwidth-bound). Follow-ups that
+   remain: AVX2 version of `next_word_boundary_pos` (32 B/iter — but see
+   bandwidth caveat in item 1; measure dense-vs-sparse corpora first), and
+   deleting the dead `use_wb_candidate_path`-guarded code in matcher.c now
+   that EXP-004+005 have settled the wb path.
 1. ~~Vectorize the line-start newline skip~~ — DONE as EXP-002 (accepted,
    −25 to −33% on line-start). A further step: the EXP-002 skip is SSE2
    (16 B/iter); AVX2 (32 B/iter) would nearly halve iterations on the long
@@ -307,6 +362,12 @@ New accepted baseline (post-EXP-004, wall medians, `--threads 8`, quiet,
 
 ## Profiling findings
 
+- Code-layout sensitivity (EXP-005): `OLM_ALWAYS_INLINE` on the SIMD
+  word-boundary skip helper cost the NON-wb control path +20 ms (+3.9%)
+  by bloating the shared scan loop, even though the branch is never
+  taken there; `noinline` removed the regression entirely while keeping
+  the wb win. Any future SIMD helper on a conditional path in the scan
+  loop: keep it noinline and A/B the non-conditional control mode.
 - Differential quiet-vs-output timing (pre-EXP-001): output formatting of
   4.07M match lines cost ~28% of wall time on the 256 MiB longest case;
   EXP-001 removed most of it (see accepted entry).
