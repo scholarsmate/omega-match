@@ -4,6 +4,170 @@ This file is the persistent memory for an overnight autonomous optimization
 campaign driven by fresh Hermes cron sessions. Each session reads this file
 first, performs exactly ONE bounded experiment, appends the result, and exits.
 
+## FINAL REPORT — campaign finalization (2026-09-22)
+
+### Executive summary
+
+The overnight campaign ran six bounded experiments (EXP-001 … EXP-006), all
+accepted, on branch `perf/omega-tune-2026-09`. Every change was gated on
+18/18 CTest passes plus byte-identical-output differentials against the
+pre-change binary. Cumulatively, vs the original baseline binary (same
+session, interleaved A/B, this finalization):
+
+- longest-no-overlap 256 MiB (primary case): **673 ms → 590 ms, −12.3%**
+  (output mode); quiet search floor 501 → 477 ms, −4.8%
+- longest-no-overlap 64 MiB: **176 ms → 149 ms, −15.3%**
+- line-start longest-no-overlap 256 MiB: **130 ms → 78 ms, −40.0%**
+- line-start longest-no-overlap 64 MiB: **37 ms → 23 ms, −37.8%**
+- word-boundary longest-no-overlap 256 MiB (quiet): **1146 ms → 334 ms,
+  −70.9%** — the single largest win, from removing serial candidate
+  materialization (EXP-004) plus the SSE2 boundary skip (EXP-005)
+
+No experiment was rejected or inconclusive; two sub-variants were rejected
+mid-experiment on regression evidence (EXP-005 always-inline variant;
+EXP-006 prefetch/batch bloom variants — recorded as dead ends). The final
+binary reproduces the EXP-006 recorded baseline (quiet lno ≈477–485 ms) and
+is byte-identical to the original on every flag combination tested.
+
+### Original baseline (commit 407f128 lineage, binary `olm-baseline`,
+sha256 3e3eec7b…)
+
+Harness medians (7 runs, match-only, output mode, `--threads 8`):
+- longest-no-overlap 64 MiB: 0.1693 s (378 MiB/s)
+- longest-no-overlap 256 MiB: ~0.66–0.68 s (~375–395 MiB/s)
+- line-start 64 MiB: 0.0348 s (1840 MiB/s)
+
+Direct wall-time (this finalization's interleaved A/B against the preserved
+original binary, medians of 7 reps for 256 MiB / 5 for 64 MiB, output mode
+unless noted): lno 256 = 673 ms (651–727); lno 64 = 176 ms (172–180);
+ls 256 = 130 ms (124–140); ls 64 = 37 ms (36–38); lno 256 quiet = 501 ms
+(492–533); wb 256 quiet = 1146 ms (1125–1187).
+
+### Final baseline (HEAD 27ecca3, EXP-006 accepted state)
+
+Harness medians (this finalization, 7 runs, match-only, output mode):
+- longest-no-overlap 64 MiB: **0.1484 s (431.2 MiB/s)**
+- longest-no-overlap 256 MiB: **0.6301 s (406.3 MiB/s)**
+- line-start 64 MiB: **0.0243 s (2630.1 MiB/s)**
+- line-start 256 MiB: **0.0851 s (3008.9 MiB/s)**
+
+Direct wall-time (same interleaved A/B session as above): lno 256 = 590 ms
+(586–603); lno 64 = 149 ms (146–152); ls 256 = 78 ms (74–89); ls 64 = 23 ms
+(22–23); lno 256 quiet = 477 ms (469–493); wb 256 quiet = 334 ms (326–356).
+Harness correctness lines: `longest-no-overlap: OK (14465441 bytes)`,
+`line-start: OK (3855881 bytes)`.
+
+### Cumulative percentage improvement (same-session A/B, final vs original
+binary — the authoritative figures; artifact
+`~/.hermes/cache/scratch/omegafinal/final-ab.tsv`)
+
+| Case (threads 8)                    | Original | Final   | Δ        | %      |
+|-------------------------------------|---------:|--------:|---------:|-------:|
+| longest-no-overlap 256 MiB (output) |   673 ms |  590 ms |    −83 ms | −12.3% |
+| longest-no-overlap 256 MiB (quiet)  |   501 ms |  477 ms |    −24 ms |  −4.8% |
+| longest-no-overlap 64 MiB (output)  |   176 ms |  149 ms |    −27 ms | −15.3% |
+| line-start lno 256 MiB (output)     |   130 ms |   78 ms |    −52 ms | −40.0% |
+| line-start lno 64 MiB (output)      |    37 ms |   23 ms |    −14 ms | −37.8% |
+| word-boundary lno 256 MiB (quiet)   |  1146 ms |  334 ms |   −812 ms | −70.9% |
+
+Final-vs-original separation was clean in every rep of lno64, ls256, ls64
+and wb256 (ranges never overlapped); on lno256 the base max (651) and final
+min (586) also never overlapped. Harness comparison agrees directionally
+(64 MiB lno −12.3%, line-start 64 MiB −30.2%) but cross-session absolute
+numbers carry the powersave-governor drift caveat noted throughout.
+
+### Accepted experiments (all on `perf/omega-tune-2026-09`)
+
+1. **EXP-001** `45902c5` — fast u64 writer replaces snprintf in
+   match-output loop. −12.2% lno 256 output, −18.5% line-start 256.
+2. **EXP-002** `9830f4c` — SSE2 skip to next line-start in line-start
+   gate. −25 to −33% on line-start cases.
+3. **EXP-003** `56bd19c` — default OMP static chunk 4096 → 1 MiB.
+   −7 to −10 ms on lno 256 quiet (pooled n=48, sign test p=0.003).
+4. **EXP-004** `e933485` — route `--word-boundary` through the
+   single-pass in-loop gate (dead-code the materialization path).
+   −68.1% on word-boundary (1149 → 366 ms).
+5. **EXP-005** `37ce3f0` — SSE2 skip to next word boundary in the in-loop
+   gate (noinline variant). −3.3% on wb; code-layout lesson recorded.
+6. **EXP-006** `27ecca3` — inline `bloom_filter_query` into matcher.c TU
+   (kills per-position PLT call). −3.4% on lno 256 (p=10⁻⁸, 37/40 pairs).
+
+### Rejected / inconclusive experiments
+
+No top-level experiment was rejected; acceptance rate 6/6. Rejected
+sub-variants and dead ends (see Known dead ends above):
+- EXP-005 always-inline SIMD skip: wb win kept but +3.9% regression on the
+  non-wb control (18/18 pairs) → reverted to `noinline` form (accepted).
+- Bloom layout/prefetch/batching variants (EXP-006 microbenchmark): all
+  no-better-or-worse; 64 KiB bloom never leaves L1/L2 on base corpus.
+- No result in this campaign was left inconclusive; EXP-003's small effect
+  was resolved by pooling n=48 rather than declared inconclusive.
+
+### Remaining bottlenecks
+
+- **lno 256 quiet floor ≈ 477 ms (~535 MiB/s at 8 threads)**: dominated by
+  the per-position scan itself — `pack_gram`/`fast_gram_hash` chain plus
+  u32 candidate-list append and `core_match` bookkeeping — not I/O, not the
+  bloom probe (now inlined).
+- **line-start ≈ 53–60 ms quiet at 256 MiB (~5 GB/s effective)**: likely
+  memory-bandwidth bound; further SIMD width (AVX2) needs a
+  compute-bound (dense-newline) demonstration first.
+- **word-boundary ≈ 334 ms**: also close to memory-bound after EXP-004/005.
+- Output path is now cheap (EXP-001); the residual output-vs-quiet gap is
+  ~113 ms for 4.07M lines (~28 ns/line), i.e. buffered write + emit loop.
+
+### Recommended next experiments
+
+1. Per-position scan bookkeeping: reduce `pack_gram`/`fast_gram_hash`
+   chain cost at every position (biggest remaining target per EXP-006).
+2. u32 candidate-list append + `core_match` per-position bookkeeping.
+3. `OUTPUT_BUFFER_SIZE` 64 KiB → 256 KiB/1 MiB in
+   `print_results_buffered_fd` (cheap, isolated, output mode only).
+4. Delete the dead `use_wb_candidate_path`-guarded materialization code
+   (hygiene; EXP-004/005 settled the wb path).
+5. AVX2 variants of the SSE2 skips — ONLY after a dense-corpus A/B proves
+   the skips are compute- not bandwidth-bound.
+6. Fix `olm compile` in this sandbox, then build a 100k-pattern corpus
+   whose bloom spills past L2 to re-open probe-layout work.
+7. Verify `--line-end` + `--line-start` zero-match intent (EXP list item 5).
+
+### Exact reproduction commands
+
+```bash
+cd /home/davin/git/OMEGA/omega-match-tune   # worktree, branch perf/omega-tune-2026-09
+
+# Build
+cmake --preset release -DOMEGA_MATCH_REQUIRE_OPENMP=ON   # NOTE: cache here is Unix Makefiles;
+cmake --build --preset release                           # delete CMakeCache.txt first if re-gen'ing with Ninja
+
+# Correctness (python_pytest blocked in this sandbox — excluded, pre-existing)
+ctest --test-dir build-gcc-release -E python_pytest
+
+# Primary benchmark harness (corpus auto-regenerated in /tmp/omega-match-scaling if missing)
+python3 scripts/benchmark_scaling.py --olm release=build-gcc-release/olm \
+  --sizes-mib 64,256 --cases longest-no-overlap,line-start --threads 8 --runs 7 \
+  --mode output --olm-pattern-mode both --work-dir /tmp/omega-match-scaling \
+  --skip-grep --skip-ripgrep
+
+# Direct wall-time A/B methodology (powersave governor makes cross-session
+# absolute numbers unreliable; interleave old vs new binary per rep):
+#   date +%s%N around: olm match --threads 8 [--quiet] [--longest --no-overlap |
+#   --line-start --longest --no-overlap | --word-boundary --longest --no-overlap]
+#   patterns-base.olm haystack-{64,256}m.bin   (7+ reps, medians, check range separation)
+
+# Byte-identity differential vs original baseline binary (14 checks):
+bash ~/.hermes/cache/scratch/omegafinal/identity-check.sh
+```
+
+### Final branch / commit
+
+- Final branch: `perf/omega-tune-2026-09` (worktree
+  `/home/davin/git/OMEGA/omega-match-tune`); nothing pushed to any remote.
+- Final accepted code commit: `27ecca3` (EXP-006).
+- Correctness at finalization: CTest 18/18 pass; final-vs-original binary
+  byte-identity differential 14/14 OK (4M + 64M corpora × 7 flag combos);
+  harness internal correctness checks OK.
+
 ## Standing rules
 
 - Work happens ONLY on branch `perf/omega-tune-2026-09` in the worktree
@@ -16,6 +180,9 @@ first, performs exactly ONE bounded experiment, appends the result, and exits.
 
 ## Campaign state
 
+- **CAMPAIGN CLOSED 2026-09-22 (finalization pass).** Final branch
+  `perf/omega-tune-2026-09` @ 27ecca3 (code) + final report commit. All
+  figures above are final; see FINAL REPORT at top of this file.
 - Current accepted branch: `perf/omega-tune-2026-09`
 - Current HEAD at campaign start: 407f128 (same as origin/main)
 - Current accepted baseline: EXP-006 (bloom_filter_query inlined into
