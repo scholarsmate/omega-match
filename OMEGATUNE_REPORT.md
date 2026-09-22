@@ -628,3 +628,77 @@ New accepted baseline (post-EXP-006, wall medians, `--threads 8`, quiet,
   SSE2 skip cut the line-start 256 MiB quiet floor 79→53 ms, i.e. the gate
   loop itself was ~1/3 of line-start scan cost; remaining line-start cost
   (~53 ms ≈ 5 GB/s read) looks memory-bound, not loop-bound.
+
+---
+
+## PR review pass — f052478 + 3391a60 (perf/omega-tune-2026-09 vs 3400f72/EXP-006)
+
+Review-only pass over the two pushed fix commits against the three concerns
+raised in the pre-review audit. No new optimizations attempted.
+
+### Concern 1 — SIMD word-boundary mask (RESOLVED, restructured)
+
+`next_word_boundary_pos` (matcher.c:245) was rewritten instead of masked:
+`b = m ^ ((m << 1) | carry)` may set bit 16, but the new `rel`/`shifted`
+logic makes that provably harmless — the function returns at most
+`blk + 16 <= end` (loop invariant `pos < simd_limit = end & ~15`), and the
+sole call site (matcher.c:1485) re-tests the returned position with the
+full scalar predicates before using it, so false positives cost one extra
+iteration and false negatives are impossible (no in-block transition bit is
+skipped; cross-block boundaries are re-derived via `carry`).
+Differential evidence: 186/186 byte-exact vs scalar reference oracle
+(15/16/17 and 31/32/33 block transitions, CR/LF, chunk edges) on the SSE2
+build, the clang build, and the forced scalar-fallback build.
+
+### Concern 2 — SSE2/noinline portability guards (RESOLVED)
+
+- `#include <emmintrin.h>` + `OLM_HAVE_SSE2` now behind
+  `(x86_64 || _M_X64) && !_MSC_VER` (matcher.c:154); all `__m128i`/helper
+  use is inside `#ifdef OLM_HAVE_SSE2`; MSVC and non-x86 take the scalar
+  `#else` paths (verified compiling + differential-passing with SSE2 off).
+- `__attribute__((noinline))` guarded by `__GNUC__ || __clang__`
+  (matcher.c:242), comment documents the EXP-005 inline-bloat A/B.
+
+### Concern 3 — OpenMP canonical form / MSVC (RESOLVED)
+
+3391a60 restructures the full-scan loop: `#pragma omp for
+schedule(static,1)` now iterates a signed `chunk_index` (never modified in
+body); the fast-forward cursor `pos` is an ordinary private variable in a
+plain `while` loop (matcher.c:1437-1456). Chunk→thread mapping is identical
+to the old `omp_set_schedule(static, chunk)` (chunk i → thread i mod T).
+The candidate loop (matcher.c:1326, `schedule(runtime)` fed by
+`omp_set_schedule` at 1202) uses a signed `bi` that is read-only in-body —
+canonical. Both index types are signed per MSVC C3016.
+Identity evidence: 120/120 multithread match-output identity checks (1 and
+8 threads, incl. prime chunk 1,000,003 forcing boundary-crossing runs).
+
+### Build & test matrix (HEAD 3391a60)
+
+| Configuration                    | Result |
+|----------------------------------|--------|
+| gcc Release + OMP, ctest (18)    | 18/18  |
+| clang Release + OMP, ctest (18)  | 18/18  |
+| scalar fallback (SSE2 off)       | 18/18 + 186/186 diff |
+| python bindings (pytest)         | 69 passed, 1 skipped |
+| wb edge probe vs oracle          | 186/186 |
+
+Pre-existing (NOT introduced here): clang + OpenMP-disabled + -Werror fails
+on unused `omp_get_thread_num`/`omp_set_schedule` stubs (matcher.c:42,44) —
+reproduced identically on 3400f72; libomp present in this environment masks
+it. Worth a follow-up `__attribute__((unused))` or `-Wunused-function`
+exclusion, out of scope for this PR.
+
+### Performance A/B vs EXP-006 baseline (3400f72, fresh build, interleaved, medians)
+
+- longest-no-overlap 256 MiB: 444.0 → 447.0 ms (+0.7%, noise band)
+- line-start 256 MiB: 49.5 → 48.0 ms (-3.0%)
+- word-boundary 256 MiB: 334.5 → 332.0 ms (-0.7%)
+
+No regressions beyond run-to-run noise; no gains claimed (this pass was a
+correctness/portability review, not an optimization round).
+
+### Verdict
+
+All three review concerns fixed and independently verified. APPROVE for
+merge; the clang no-OpenMP -Werror stub failure is pre-existing and tracked
+as a follow-up.
