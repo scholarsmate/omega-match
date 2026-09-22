@@ -210,6 +210,7 @@ OLM_ALWAYS_INLINE static size_t next_line_start_pos(const uint8_t *restrict h,
 // Signed byte compares are safe: any byte >= 0x80 is negative and fails all
 // range tests; (v|0x20) keeps bit7 set so high bytes cannot alias into the
 // letter range.
+#ifdef OLM_HAVE_SSE2
 OLM_ALWAYS_INLINE static unsigned word_class_mask(const __m128i v) {
   const __m128i lower = _mm_or_si128(v, _mm_set1_epi8(0x20));
   const __m128i alpha = _mm_and_si128(
@@ -222,6 +223,7 @@ OLM_ALWAYS_INLINE static unsigned word_class_mask(const __m128i v) {
       _mm_or_si128(alpha, digit), _mm_cmpeq_epi8(v, _mm_set1_epi8('_')));
   return (unsigned)_mm_movemask_epi8(word);
 }
+#endif
 
 // Given a position `pos` > 0 that failed the in-loop word-boundary test,
 // return the first p in (pos, end) where IS_WORD(h[p]) != IS_WORD(h[p-1]),
@@ -236,7 +238,10 @@ OLM_ALWAYS_INLINE static unsigned word_class_mask(const __m128i v) {
 // shared scan loop bloated the hot loop for non-wb runs (~+20ms measured on
 // the plain longest-no-overlap control); a call only happens on failed
 // positions, which are a minority anyway.
-__attribute__((noinline)) static size_t
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
+static size_t
 next_word_boundary_pos(const uint8_t *restrict h, size_t pos, size_t end) {
 #ifdef OLM_HAVE_SSE2
   const size_t simd_limit = (end >= 16) ? (end & ~(size_t)15) : 0;
@@ -1257,7 +1262,7 @@ core_match(const omega_list_matcher_t *restrict matcher,
   // EXP-004: the same reasoning applies to word boundaries. The materialize
   // path below ran two SERIAL byte-at-a-time passes (count, then fill) and
   // stored up to 8 bytes of offsets per input byte; on a typical text corpus
-  // ~40% of positions are boundaries, so it allocated and wrote ~0.3x the
+  // ~40% of positions are boundaries, so it allocated and wrote ~3.2x the
   // haystack size serially before the parallel scan even started. The
   // single-pass loop already gates every position with the identical
   // word-boundary test at negligible cost, so the candidate path is now
