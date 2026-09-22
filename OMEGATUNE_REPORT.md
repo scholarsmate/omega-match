@@ -18,9 +18,10 @@ first, performs exactly ONE bounded experiment, appends the result, and exits.
 
 - Current accepted branch: `perf/omega-tune-2026-09`
 - Current HEAD at campaign start: 407f128 (same as origin/main)
-- Current accepted baseline: EXP-001 (fast integer output writer) — see
-  numbers under "Original baseline" (pre-EXP-001) and EXP-001 entry below.
-- Session log: EXP-001 accepted (this entry), 2026-09-21/22.
+- Current accepted baseline: EXP-002 (SSE2 line-start skip) — see numbers
+  under EXP-001 and EXP-002 entries below.
+- Session log: EXP-001 accepted (2026-09-21/22), EXP-002 accepted
+  (2026-09-22).
 
 ## Environment (fixed for the campaign)
 
@@ -103,6 +104,59 @@ mode, same corpus/commands as above):
   −15%)
 Quiet-mode floors unchanged (~449 ms / ~100 ms) — search itself untouched.
 
+### EXP-002 — SSE2 skip to next line-start in the line-start scan — ACCEPTED
+
+Hypothesis (recommended experiment #1, adapted): in `core_match()`
+(matcher.c), line-start mode gates every byte of the haystack with
+`if (line_start && pos > 0 && !is_line_end(haystack[pos-1])) continue;`,
+walking interior bytes one at a time even though only ~0.7% of positions
+(~1.81M newlines in 256 MiB, avg line length ~148 B) are line starts.
+Instead of vectorizing the whole pass (the per-position work is already
+trivial once the gate rejects), skip *directly* from a failed gate to the
+next line-ending byte using SSE2, so the scan touches memory at SIMD speed.
+
+Implementation (+54/−0 lines in `omega_match/src/matcher.c` only):
+`next_line_start_pos(h, pos, end)` — SSE2 (`_mm_loadu_si128` +
+`_mm_cmpeq_epi8` vs `\n` and `\r`, combined movemask, `__builtin_ctz`)
+advances 16 bytes per iteration to the first line-ending byte at >= pos and
+returns that position + 1 (or `end`). The main-loop gate now calls it and
+jumps `pos = n - 1` (loop `++pos` lands on `n`). Safety details: all SIMD
+blocks are clamped fully inside `[0, end)` (`simd_limit = end & ~15`) so a
+load can never cross the end of an mmap'd read-only buffer; the <16-byte
+tail is scalar; unaligned load used because the matcher may be called with
+window-relative pointers (transform path). Non-x86 falls back to the scalar
+loop, same semantics. Note the previous EXP-001 report's quiet-floor of
+~100 ms for line-start was the *interleaved* figure; fresh baseline quiet
+median here is ~79 ms (governor drift), which is why A/B interleaving
+remains mandatory.
+
+Correctness:
+- All 18 CTest tests pass (`ctest --test-dir build-gcc-release -E
+  python_pytest`).
+- Differential byte-identity vs pre-change binary across 8 edge-case
+  corpora (empty, 1-byte, 15/16/17-byte, all-newlines, random with CR/LF
+  and CRLF pairs, 300 KB single long line + newlines) x 8 flag combos
+  including `--line-start`, `--line-start --longest --no-overlap`,
+  `--line-start --ignore-case`, `--line-start --word-boundary`,
+  `--line-start --show-keys`, and non-line-start controls: 0 mismatches,
+  exit codes identical.
+- Byte-identical output on the real 256 MiB corpus for `--line-start`,
+  `--line-start --longest --no-overlap`,
+  `--line-start --ignore-case --word-boundary` (sha256 compared at end of
+  A/B series).
+
+Benchmark (interleaved A/B vs pre-change binary, 9 reps line-start / 5 reps
+control, `--threads 8`, medians):
+- line-start longest-no-overlap 256 MiB, quiet:   B 79 ms -> E 53 ms, −26 ms (−32.9%); separation clean every rep (E max 54 < B min 77).
+- line-start longest-no-overlap 256 MiB, output:  B 104 ms -> E 78 ms, −26 ms (−25.0%).
+- line-start longest-no-overlap 64 MiB, quiet:    B 24 ms -> E 16 ms, −8 ms (−33.3%).
+- control longest-no-overlap 256 MiB (no line-start): B 563 ms vs E 570 ms, +7 ms (+1.2%) — within noise, path untouched by the change (gate is `line_start`-conditional).
+
+New accepted baseline (post-EXP-002, wall medians, `--threads 8`):
+- line-start longest-no-overlap 256 MiB: output ≈ 78 ms, quiet ≈ 53 ms
+- line-start longest-no-overlap 64 MiB:  quiet ≈ 16 ms
+- longest-no-overlap 256 MiB: ≈ 578 ms (unchanged; EXP-001 baseline holds)
+
 ## Rejected / inconclusive experiments
 
 (none yet)
@@ -119,21 +173,27 @@ Quiet-mode floors unchanged (~449 ms / ~100 ms) — search itself untouched.
 
 ## Recommended next experiments
 
-1. Vectorize the line-start newline skip (matcher.c scan loop): the scan
-   advances byte-by-byte to the next `\n`; SSE2/AVX2 `_mm_cmpeq_epi8` scan
-   should cut line-start cost further (currently ~106 ms / 256 MiB; even
-   memory-bound, per-byte loop likely leaves throughput on the table).
-   Validate by timing `--line-start` with dense vs sparse newlines.
+1. ~~Vectorize the line-start newline skip~~ — DONE as EXP-002 (accepted,
+   −25 to −33% on line-start). A further step: the EXP-002 skip is SSE2
+   (16 B/iter); AVX2 (32 B/iter) would nearly halve iterations on the long
+   interior runs — but at 256 MiB the skip is now likely memory-bandwidth
+   bound (~5 GB/s effective read at 53 ms for 256 MiB is near single-socket
+   bandwidth); measure first with dense-newline vs sparse-
+   newline corpora before investing.
 2. Output-buffer size / write granularity in `print_results_buffered_fd`
    (OUTPUT_BUFFER_SIZE currently 64 KiB — try 256 KiB/1 MiB; few writes vs
    many). Cheap, isolated.
-3. Chunk-size tuning sweep in the match pipeline (chunk_size option) for
-   the 256 MiB case at 8 threads.
+3. Chunk-size tuning sweep in the match pipeline (`omp_chunk_size`,
+   `matcher->omp_chunk_size` default 4096 static schedule) for the 256 MiB
+   longest case at 8 threads; the +7 ms control wobble in EXP-002 hints at
+   static-schedule load imbalance.
 4. Bloom-filter probe layout (`omega_match/src/bloom.c` ~lines 30–95,
    `bloom_filter_add`/`bloom_filter_query`; 3 probes into one bitmap per
    `omega/details/bloom.h`): consider a blocked/squarized layout to reduce
    misses per candidate position. Profile via differential timing on a
-   low-match-rate corpus where candidate rejection dominates.
+   low-match-rate corpus where candidate rejection dominates. The
+   longest-no-overlap 256 MiB case (≈578 ms, ~443 MiB/s output / ~570 MiB/s
+   quiet) is the big remaining target; every byte runs a bloom probe.
 5. `--line-end` + `--line-start` combined mode currently produces zero
    matches on the base corpus — verify intent before optimizing it.
 
@@ -148,3 +208,7 @@ Quiet-mode floors unchanged (~449 ms / ~100 ms) — search itself untouched.
 - Read of matcher.c scan loops (lines ~1021–1425): candidate positions are
   gated by a per-position bloom probe; line-start mode then walks to the
   line start byte-by-byte. bloom.c uses 3 hash probes into one bitmap.
+- EXP-002 confirmation: replacing the byte-by-byte line-start gate with an
+  SSE2 skip cut the line-start 256 MiB quiet floor 79→53 ms, i.e. the gate
+  loop itself was ~1/3 of line-start scan cost; remaining line-start cost
+  (~53 ms ≈ 5 GB/s read) looks memory-bound, not loop-bound.

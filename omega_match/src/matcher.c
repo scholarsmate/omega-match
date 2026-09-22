@@ -142,6 +142,62 @@ OLM_ALWAYS_INLINE static int is_at_line_end(const uint8_t *restrict haystack,
   return is_line_end(haystack[end_pos]);
 }
 
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(_MSC_VER)
+#include <emmintrin.h> // SSE2: baseline on x86-64 gcc/clang
+#define OLM_HAVE_SSE2 1
+#endif
+
+// Given a position `pos` that failed the line-start test (haystack[pos-1] is
+// not a line ending), return the next position p >= pos whose preceding byte
+// haystack[p-1] IS a line ending, or `end` if there is none in [pos, end).
+// SSE2: compare 16 bytes at a time for '\n'/'\r', take the lowest set bit of
+// the combined movemask.  The loads stay inside the aligned block containing
+// the search range, so this never faults even on the final partial page of an
+// mmap'd read-only haystack.  Falls back to a scalar loop elsewhere.
+OLM_ALWAYS_INLINE static size_t next_line_start_pos(const uint8_t *restrict h,
+                                                    size_t pos, size_t end) {
+#ifdef OLM_HAVE_SSE2
+  const __m128i nl = _mm_set1_epi8('\n');
+  const __m128i cr = _mm_set1_epi8('\r');
+  // SIMD blocks must lie fully inside [0, end) so a 16-byte load can
+  // never touch the page past the end of an mmap'd read-only buffer.
+  const size_t simd_limit = (end >= 16) ? (end & ~(size_t)15) : 0;
+  while (pos < end) {
+    if (pos >= simd_limit) { // < 16 bytes left: scalar tail
+      while (pos < end && !is_line_end(h[pos - 1])) {
+        ++pos;
+      }
+      return pos;
+    }
+    const size_t blk = pos & ~(size_t)15; // blk + 16 <= simd_limit <= end
+    // Unaligned load: callers may pass window-relative pointers that are not
+    // 16-byte aligned; the block is fully inside [0, end) so this is safe.
+    const __m128i v = _mm_loadu_si128((const __m128i *)(h + blk));
+    const unsigned mask = (unsigned)(_mm_movemask_epi8(_mm_cmpeq_epi8(v, nl)) |
+                                     _mm_movemask_epi8(_mm_cmpeq_epi8(v, cr)));
+    // Bits of the block before pos are irrelevant: drop them.
+    const unsigned rel = (unsigned)(pos - blk);
+    const unsigned shifted = (rel >= 16) ? 0u : (mask >> rel);
+    if (shifted) {
+      const size_t cand = blk + rel + (size_t)__builtin_ctz(shifted);
+      // cand is the offset of a line-ending byte at >= pos; the following
+      // position is cand+1.
+      if (cand + 1 < end) {
+        return cand + 1;
+      }
+      return end;
+    }
+    pos = blk + 16;
+  }
+  return end;
+#else
+  while (pos < end && !is_line_end(h[pos - 1])) {
+    ++pos;
+  }
+  return pos;
+#endif
+}
+
 // --- OMP Functions ---
 
 // Set number of threads for matching on a specific matcher
@@ -1259,8 +1315,13 @@ core_match(const omega_list_matcher_t *restrict matcher,
       for (pos = 0; pos < hsize; ++pos) {
         // Match only byte zero and bytes immediately following a line ending.
         // This single parallel pass keeps line-start auxiliary memory constant
-        // even when nearly every byte is a newline.
+        // even when nearly every byte is a newline.  When the current position
+        // fails the test, SSE2-skips directly to the next line-start instead
+        // of re-testing every interior byte.
         if (line_start && pos > 0 && !is_line_end(haystack[pos - 1])) {
+          const size_t n =
+              next_line_start_pos(haystack, (size_t)pos, (size_t)hsize);
+          pos = (ptrdiff_t)n - 1; // loop ++pos lands on n (or exits if n==hsize)
           continue;
         }
 
