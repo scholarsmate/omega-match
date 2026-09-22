@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   search, and Bloom misses probe subsequent hashes lazily.
 - Line-start matching uses a parallel single-pass scan with an early boundary
   branch, avoiding per-line offset storage on newline-dense inputs.
+- Line-start and word-boundary scans use guarded SSE2 skips on x86-64, with
+  scalar fallbacks on other targets, and the default OpenMP chunk is now 1 MiB.
+- Scan chunks are capped to roughly one per requested worker on smaller inputs,
+  preserving parallelism while retaining the lower large-input overhead.
+- Match output uses direct unsigned-decimal formatting instead of per-result
+  `snprintf` calls.
 - PGO anchor workloads now pass the line-start and line-end options they are
   intended to train.
 - GCC PGO profile transfer copies only `.gcda` counters into the use build,
@@ -39,6 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/dev/null` early-exit optimization from measuring only the first match.
 - Removed unsupported historical multi-GB/s and extreme grep-ratio claims from
   rendered documentation and replaced them with reproducible measurements.
+- Dynamic OpenMP teams no longer leave null per-thread result slots that crash
+  final result merging when fewer workers are created than requested.
+- The CLI no longer references the OpenMP runtime in single-threaded builds,
+  restoring configurations where OpenMP is intentionally unavailable.
+- Chunk sizes whose power-of-two rounding would overflow `int` are rejected
+  instead of silently becoming negative and reverting to the default.
+- Buffered CLI output retries interrupted and partial writes instead of
+  silently dropping the unwritten suffix.
 
 ## [0.2.1] - 2025-08-13
 

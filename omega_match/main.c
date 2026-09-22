@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,7 +22,9 @@
 #define ssize_t int
 #endif
 
+#ifdef OMEGA_MATCH_USE_OPENMP
 #include <omp.h>
+#endif
 
 #include "omega/details/common.h"
 #include "omega/details/util.h"
@@ -30,6 +33,14 @@
 #define OUTPUT_BUFFER_SIZE (256 * 1024)
 
 typedef enum { MODE_UNDEFINED = 0, MODE_COMPILE, MODE_MATCH } omg_app_mode_t;
+
+static int max_match_threads(void) {
+#ifdef OMEGA_MATCH_USE_OPENMP
+  return omp_get_max_threads();
+#else
+  return 1;
+#endif
+}
 
 static int parse_uint64_key(const char *text, char **endptr, uint64_t *out) {
   char *end = NULL;
@@ -56,24 +67,53 @@ static int parse_uint64_key(const char *text, char **endptr, uint64_t *out) {
   return 0;
 }
 
+// Complete a raw descriptor write, retrying interruptions and short writes.
+static void write_all_fd(const int fd, const char *buf, size_t len) {
+  while (len > 0) {
+#ifdef _WIN32
+    const unsigned int request =
+        len > (size_t)INT_MAX ? (unsigned int)INT_MAX : (unsigned int)len;
+#else
+    const size_t request = len;
+#endif
+    const ssize_t written = write(fd, buf, request);
+    if (written < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      perror("write");
+      ABORT("write");
+    }
+    if (written == 0) {
+      ABORT("write returned zero");
+    }
+    buf += (size_t)written;
+    len -= (size_t)written;
+  }
+}
+
 // Flush helper: writes to console or raw file
 #ifdef _WIN32
 static void flush_buffer(const char *buf, size_t len) {
   HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-  DWORD written;
   if ((GetFileType(hOut) & ~FILE_TYPE_REMOTE) == FILE_TYPE_CHAR) {
-    WriteConsoleA(hOut, buf, (DWORD)len, &written, NULL);
+    while (len > 0) {
+      const DWORD request =
+          len > (size_t)MAXDWORD ? MAXDWORD : (DWORD)len;
+      DWORD written = 0;
+      if (!WriteConsoleA(hOut, buf, request, &written, NULL) || written == 0) {
+        ABORT("WriteConsoleA");
+      }
+      buf += written;
+      len -= written;
+    }
   } else {
-    _write(_fileno(stdout), buf, (int)len);
+    write_all_fd(_fileno(stdout), buf, len);
   }
 }
 #else
 static void flush_buffer(const char *buf, size_t len) {
-  const ssize_t written = write(STDOUT_FILENO, buf, len);
-  if (unlikely(written < 0)) {
-    perror("write");
-    ABORT("write");
-  }
+  write_all_fd(STDOUT_FILENO, buf, len);
 }
 #endif
 
@@ -121,11 +161,7 @@ static void flush_output(const char *restrict buffer, size_t *restrict pos,
   if (use_console_api) {
     flush_buffer(buffer, *pos);
   } else {
-    const ssize_t written = write(fd, buffer, *pos);
-    if (unlikely(written < 0)) {
-      perror("write");
-      ABORT("write");
-    }
+    write_all_fd(fd, buffer, *pos);
   }
   *pos = 0;
 }
@@ -604,14 +640,14 @@ int main(const int argc, char *argv[]) {
     if (threads > 0) {
       if (omega_matcher_set_num_threads(matcher, threads) != 0) {
         fprintf(stderr, "Error: thread count must be 1..%d\n",
-                omp_get_max_threads());
+                max_match_threads());
         free(new_argv);
         return EXIT_FAILURE;
       }
     }
     if (chunk_size > 0) {
       if (omega_matcher_set_chunk_size(matcher, chunk_size) != 0) {
-        fputs("Error: chunk size must be > 0\n", stderr);
+        fputs("Error: chunk size is invalid or too large\n", stderr);
         free(new_argv);
         return EXIT_FAILURE;
       }

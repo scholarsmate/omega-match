@@ -143,7 +143,7 @@ correctness runs. This bare-metal snapshot is not directly comparable to the
 earlier WSL2 measurements; differences between them cannot be attributed to
 OmegaMatch changes alone.
 
-| Mode | OM PGO compile + match | OM PGO reused store | GNU grep 3.12-modified | ripgrep 15.2 |
+| Mode | OM PGO compile + match | OM PGO reused store | Arch grep 3.12-2 | ripgrep 15.2 |
 |---|---:|---:|---:|---:|
 | longest + no-overlap | 447 MiB/s | 461 MiB/s | 360 MiB/s | 262 MiB/s |
 | line start | 2,734 MiB/s | 3,071 MiB/s | 39 MiB/s | 445 MiB/s |
@@ -575,7 +575,7 @@ with Matcher("lines.olm") as matcher:
 with Matcher("patterns.olm") as matcher:
     # Configure for your workload
     matcher.set_threads(8)         # Use all CPU cores
-    matcher.set_chunk_size(4096)   # Larger chunks for big data
+    matcher.set_chunk_size(0)      # Use the tuned 1 MiB default
     
     # Process large data efficiently
     large_data = b"..." * 1000000

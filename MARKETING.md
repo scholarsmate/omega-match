@@ -51,16 +51,17 @@ This lets the DSL runtime focus on rule semantics while delegating raw scanning 
 ---
 ## Performance Snapshot (Representative Excerpts)
 
-The September 2026 Linux/WSL2 snapshot used 29,156 patterns, a warm 256 MiB
-corpus on a native Linux filesystem, and complete output from every tool.
-OmegaMatch used eight OpenMP threads; GNU grep was single-threaded, and
-ripgrep received `-j 8`. Values are five-run medians, not guarantees.
+The September 2026 bare-metal Omarchy snapshot used 29,156 patterns, a warm
+256 MiB corpus on a native Linux filesystem, and complete output from every
+tool. OmegaMatch used eight OpenMP threads; GNU grep was single-threaded, and
+ripgrep received `-j 8`. Values are five-run medians, not guarantees and are
+not directly comparable with earlier WSL2 measurements.
 
-| Scenario | OM PGO compile + match | OM PGO reused store | GNU grep 3.11 | ripgrep 15.2 |
+| Scenario | OM PGO compile + match | OM PGO reused store | Arch grep 3.12-2 | ripgrep 15.2 |
 |----------|-----------------------:|--------------------:|--------------:|---------------:|
-| longest + no-overlap | 233 MiB/s | 234 MiB/s | 169 MiB/s | 108 MiB/s |
-| line start | 944 MiB/s | 1,113 MiB/s | 23 MiB/s | 227 MiB/s |
-| line end | 497 MiB/s | 525 MiB/s | 26 MiB/s | 49 MiB/s |
+| longest + no-overlap | 447 MiB/s | 461 MiB/s | 360 MiB/s | 262 MiB/s |
+| line start | 2,734 MiB/s | 3,071 MiB/s | 39 MiB/s | 445 MiB/s |
+| line end | 735 MiB/s | 750 MiB/s | 44 MiB/s | 78 MiB/s |
 
 The primary OmegaMatch column includes source-pattern compilation on every
 invocation, as do the grep and ripgrep measurements. The second OmegaMatch

@@ -74,19 +74,20 @@ Linux home directory avoids making Windows-mounted filesystem behavior part of
 the result. Warm-cache results still include mapping and page traversal but do
 not represent cold-storage latency.
 
-### Corrected September 2026 snapshot
+### September 2026 bare-metal snapshot
 
-Environment: Ubuntu 24.04.3 under WSL2, Intel Core Ultra 7 165H, GCC 13.3,
-eight OpenMP threads, GNU grep 3.11, ripgrep 15.2, 29,156 name patterns, and a
-warm 256 MiB KJV-derived corpus on `/tmp`. Values are medians of five runs.
-Complete outputs were consumed; byte counts and SHA-256 digests agreed in
-companion correctness runs.
+Environment: Omarchy 4.0.4 on bare metal, Linux 7.2.5, Intel Core Ultra 7
+165H, GCC 16.2, eight OpenMP threads, Arch grep 3.12-2, ripgrep 15.2, 29,156
+name patterns, and a warm 256 MiB KJV-derived corpus on a native Linux
+filesystem. Values are medians of five runs. Complete outputs were consumed;
+byte counts and SHA-256 digests agreed in companion correctness runs. These
+results are not directly comparable to earlier WSL2 measurements.
 
 | Mode | OM PGO compile + match | OM PGO reused store | GNU grep | ripgrep |
 |---|---:|---:|---:|---:|
-| longest + no-overlap | 233 MiB/s | 234 MiB/s | 169 MiB/s | 108 MiB/s |
-| line start | 944 MiB/s | 1,113 MiB/s | 23 MiB/s | 227 MiB/s |
-| line end | 497 MiB/s | 525 MiB/s | 26 MiB/s | 49 MiB/s |
+| longest + no-overlap | 447 MiB/s | 461 MiB/s | 360 MiB/s | 262 MiB/s |
+| line start | 2,734 MiB/s | 3,071 MiB/s | 39 MiB/s | 445 MiB/s |
+| line end | 735 MiB/s | 750 MiB/s | 44 MiB/s | 78 MiB/s |
 
 OmegaMatch used eight OpenMP threads. GNU grep is single-threaded, and
 ripgrep's `-j 8` does not guarantee eight-way processing of one input file.
@@ -101,16 +102,18 @@ Input-size scaling for output-equivalent `longest + no-overlap`:
 
 | Input | OM compile + match | OM reused store | GNU grep | ripgrep |
 |---:|---:|---:|---:|---:|
-| 4 MiB | 74 MiB/s | 152 MiB/s | 109 MiB/s | 33 MiB/s |
-| 16 MiB | 153 MiB/s | 209 MiB/s | 150 MiB/s | 70 MiB/s |
-| 64 MiB | 216 MiB/s | 228 MiB/s | 167 MiB/s | 103 MiB/s |
-| 256 MiB | 234 MiB/s | 256 MiB/s | 176 MiB/s | 115 MiB/s |
+| 4 MiB | 164 MiB/s | 221 MiB/s | 171 MiB/s | 72 MiB/s |
+| 16 MiB | 343 MiB/s | 446 MiB/s | 294 MiB/s | 164 MiB/s |
+| 64 MiB | 421 MiB/s | 437 MiB/s | 324 MiB/s | 234 MiB/s |
+| 256 MiB | 447 MiB/s | 461 MiB/s | 360 MiB/s | 262 MiB/s |
 
 The larger files amortize startup and pattern-engine construction. OmegaMatch
 does not progressively lose throughput as the haystack grows in this test.
 
-Output-suppressed PGO matcher scaling on the 256 MiB corpus (`--mode quiet
---olm-pattern-mode compiled`, median of seven runs):
+The output-suppressed and pattern-count diagnostics below are retained from an
+earlier WSL2 run and must not be compared directly with the bare-metal tables
+above. Output-suppressed PGO matcher scaling on its 256 MiB corpus (`--mode
+quiet --olm-pattern-mode compiled`, median of seven runs):
 
 | Threads | longest + no-overlap | line start | line end |
 |---:|---:|---:|---:|

@@ -1,5 +1,6 @@
 // matcher.c
 
+#include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -31,7 +32,6 @@
 
 #include <windows.h>
 #else
-#include <limits.h>
 #include <unistd.h>
 #endif
 
@@ -316,7 +316,11 @@ int omega_matcher_set_chunk_size(omega_list_matcher_t *restrict matcher,
   }
   // Ensure chunk size is a power of two
   else if ((chunk & (chunk - 1)) != 0) {
-    chunk = (int)next_power_of_two(chunk);
+    const uint32_t rounded = next_power_of_two((uint32_t)chunk);
+    if (rounded > (uint32_t)INT_MAX) {
+      return -1;
+    }
+    chunk = (int)rounded;
   }
   matcher->omp_chunk_size = chunk;
   return 0;
@@ -867,7 +871,9 @@ finalize_match_results(match_vector_t **restrict thread_matches,
   // Compute total to preallocate output buffer
   size_t total = 0;
   for (size_t i = 0; i < num_chunks; ++i) {
-    total += thread_matches[i]->count;
+    if (thread_matches[i]) {
+      total += thread_matches[i]->count;
+    }
   }
 
   // K-way merge state: one cursor per chunk
@@ -879,7 +885,7 @@ finalize_match_results(match_vector_t **restrict thread_matches,
   match_vector_t *single = NULL; // the only non-empty vector when active == 1
   for (size_t i = 0; i < num_chunks; ++i) {
     match_vector_t *v = thread_matches[i];
-    if (v->count > 0) {
+    if (v && v->count > 0) {
       runs[active].arr = v->data;
       runs[active].len = v->count;
       runs[active].idx = 0;
@@ -893,8 +899,10 @@ finalize_match_results(match_vector_t **restrict thread_matches,
   if (active == 0) {
     // Free inputs and return empty result
     for (size_t i = 0; i < num_chunks; ++i) {
-      free_match_vector(thread_matches[i]);
-      free(thread_matches[i]);
+      if (thread_matches[i]) {
+        free_match_vector(thread_matches[i]);
+        free(thread_matches[i]);
+      }
     }
     free(thread_matches);
     free(runs);
@@ -943,8 +951,10 @@ finalize_match_results(match_vector_t **restrict thread_matches,
     out->matches = single->data;
     single->data = NULL; // ownership transferred to the results
     for (size_t i = 0; i < num_chunks; ++i) {
-      free_match_vector(thread_matches[i]);
-      free(thread_matches[i]);
+      if (thread_matches[i]) {
+        free_match_vector(thread_matches[i]);
+        free(thread_matches[i]);
+      }
     }
     free(thread_matches);
     free(runs);
@@ -1016,8 +1026,10 @@ finalize_match_results(match_vector_t **restrict thread_matches,
 
   // Free inputs
   for (size_t i = 0; i < num_chunks; ++i) {
-    free_match_vector(thread_matches[i]);
-    free(thread_matches[i]);
+    if (thread_matches[i]) {
+      free_match_vector(thread_matches[i]);
+      free(thread_matches[i]);
+    }
   }
   free(thread_matches);
   free(heap);
@@ -1212,12 +1224,12 @@ core_match(const omega_list_matcher_t *restrict matcher,
   uint64_t total_filtered = 0;
   uint64_t total_comparisons = 0;
 
-  const int max_threads = omp_get_max_threads();
   match_vector_t **thread_matches =
       calloc(num_threads, sizeof(match_vector_t *));
   if (unlikely(!thread_matches)) {
     ABORT("calloc thread_matches"); // OOM
   }
+
 
   // Hoist matcher fields and create local copies to improve cache locality
   const uint32_t table_mask = matcher->header->table_size - 1;
@@ -1315,6 +1327,9 @@ core_match(const omega_list_matcher_t *restrict matcher,
         0;
 #endif
     match_vector_t *local = malloc(sizeof(*local));
+    if (unlikely(!local)) {
+      ABORT("malloc thread_matches entry");
+    }
     init_match_vector(local);
     thread_matches[tid] = local;
     const ptrdiff_t hsize = (ptrdiff_t)haystack_size;
@@ -1434,10 +1449,20 @@ core_match(const omega_list_matcher_t *restrict matcher,
       // Schedule position-sized chunks explicitly, then let a private cursor
       // fast-forward within each chunk. schedule(static, 1) on these chunk
       // descriptors preserves the previous static position distribution.
-      const ptrdiff_t scan_chunk_size =
+      ptrdiff_t scan_chunk_size =
           (ptrdiff_t)(matcher->omp_chunk_size > 0
                           ? matcher->omp_chunk_size
                           : OMEGA_DEFAULT_OMP_CHUNK);
+      // Treat the configured chunk as a maximum. For inputs smaller than one
+      // chunk per requested worker, split more finely so the tuned 1 MiB
+      // default does not force small and medium inputs onto one worker.
+      if (hsize > 0 && num_threads > 1) {
+        const ptrdiff_t per_thread =
+            hsize / num_threads + (hsize % num_threads != 0);
+        if (scan_chunk_size > per_thread) {
+          scan_chunk_size = per_thread;
+        }
+      }
       const ptrdiff_t scan_chunk_count =
           hsize / scan_chunk_size + (hsize % scan_chunk_size != 0);
       ptrdiff_t chunk_index;
@@ -1619,7 +1644,7 @@ core_match(const omega_list_matcher_t *restrict matcher,
   }
 
   omega_match_results_t *results = finalize_match_results(
-      thread_matches, max_threads, no_overlap, longest_only);
+      thread_matches, (size_t)num_threads, no_overlap, longest_only);
 
   if (candidate_pos) {
     free(candidate_pos);
