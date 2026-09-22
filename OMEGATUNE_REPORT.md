@@ -18,11 +18,12 @@ first, performs exactly ONE bounded experiment, appends the result, and exits.
 
 - Current accepted branch: `perf/omega-tune-2026-09`
 - Current HEAD at campaign start: 407f128 (same as origin/main)
-- Current accepted baseline: EXP-005 (SSE2 word-boundary skip in the
-  single-pass scan) — see EXP-005 entry under accepted experiments.
+- Current accepted baseline: EXP-006 (bloom_filter_query inlined into
+  matcher.c TU) — see EXP-006 entry under accepted experiments.
 - Session log: EXP-001 accepted (2026-09-21/22), EXP-002 accepted
   (2026-09-22), EXP-003 accepted (2026-09-22), EXP-004 accepted
-  (2026-09-22), EXP-005 accepted (2026-09-22).
+  (2026-09-22), EXP-005 accepted (2026-09-22), EXP-006 accepted
+  (2026-09-22).
 
 ## Environment (fixed for the campaign)
 
@@ -306,11 +307,88 @@ New accepted baseline (post-EXP-005, wall medians, `--threads 8`, quiet,
 - longest-no-overlap: ≈ 504 ms quiet (unchanged)
 - line-start: ≈ 53-79 ms (EXP-002 territory; unchanged)
 
-## Rejected / inconclusive experiments
+### EXP-006 — inline bloom_filter_query into matcher.c's TU — ACCEPTED
 
-(none yet)
+Hypothesis (from item 4, reframed by microbenchmark evidence): the bloom
+probe itself (random-access layout) is NOT the scan bottleneck, but the
+*out-of-line PLT call* into `bloom_filter_query` is paid at every scan
+position. Evidence chain:
+- `patterns-base.olm` bloom = 512 Kbit → 64 KiB bitmap, 6.0% fill → fits
+  L1/L2; ~9,155 probe hits per 64 Mi of haystack text (~144 ppm hit rate,
+  3-probe FPR ~2.2e-1 for a full bitmap but empirically tiny since the
+  corpus text rarely hashes to a live 4-gram). The probe's 2nd/3rd random
+  accesses almost never execute — so layout changes (blocked/squarized
+  bloom) have no fuel to burn.
+- Standalone microbenchmark (`bloom_micro`, 64 MiB prefix of
+  haystack-64m.bin against the real .olm bits, single thread): current
+  serial short-circuit query 114-117 ms; prefetch-h2 128-133 ms (WORSE —
+  prefetch of probe-2 on the ~always-miss path adds work); batched 8-wide
+  probe-1 loads 141-160 ms (WORSE — breaks the short-circuit); software-
+  pipelined next-position probe-1 111-114 ms (~neutral). Conclusion: the
+  probe *algorithm* is already at its local optimum; the dead ends are
+  layout/prefetch/batching variants.
+- Disassembly of `matcher.c.o`: `bloom_filter_query` appears as
+  `R_X86_64_PLT32` relocation — a real call per candidate position in
+  `core_match`'s hot loop (LTO is OFF by default:
+  `OMEGA_MATCH_ENABLE_LTO=OFF`), while `fast_gram_hash` and the short
+  matcher helpers are all inlined. The call forces `cand` into arg
+  registers, clobbers caller registers across the hottest branch in the
+  program, and blocks cross-statement scheduling around the probe.
+
+Implementation (+32/−3 lines in `omega_match/src/matcher.c`): added
+`#include "omega/details/hash.h"` and a `static OLM_ALWAYS_INLINE
+bloom_filter_query_inline()` — a byte-for-byte copy of `bloom.c`'s query
+body — and switched BOTH `core_match` call sites (candidate-list loop
+~line 1330, single-pass loop ~line 1478) to it. `bloom.c`'s out-of-line
+`bloom_filter_query` left untouched (still used elsewhere / by external
+linkers). Verified after build: `objdump -dr matcher.c.o | grep -c
+bloom_filter_query` → 0 PLT refs (probe fully inlined). Per the EXP-005
+code-layout lesson this helper IS on the hot path for all modes, so
+always_inline is correct here (unlike the off-path SIMD skips), and the
+non-probe control mode (line-start, where the probe runs but the SSE2
+skip dominates) was A/B'd as the regression check.
+
+Correctness:
+- CTest 18/18 pass (`-E python_pytest`).
+- Byte-identical stdout vs head binary AND identical exit codes across
+  3 corpora (4M/64M/256 MiB) × 7 flag combos (lno, ls-lno, wb-lno,
+  ic-lno, wb+ls-lno, ls, plain) = 21 checks + 16M lno control: 22/22 OK.
+
+Benchmark (interleaved A/B vs head binary, `--threads 8`, quiet, 256 MiB
+base corpus; artifacts `exp006-ab.tsv` n=12 + `exp006-final.tsv` n=14 +
+`exp006-final2.tsv` n=14 on the final binary, pooled
+`exp006-poolall.tsv` for the primary case; final2 = 14 reps after both
+call sites were converted):
+- longest-no-overlap 256 MiB: head med 504.0 ms (464-590) vs exp med
+  485.0 ms (474-529): paired median delta −17.0 ms (−3.4%), mean −17.9 ms,
+  exp faster in 37/40 pairs (sign test one-sided p ≈ 10⁻⁸). Final-binary
+  alone (final2, n=14): −17.0 ms median, 13/14 wins — consistent.
+- word-boundary longest-no-overlap: head med 358.0 vs exp med 352.0:
+  paired median −4.0 ms (−1.1%), 18/24 wins — consistent direction, same
+  mechanism (also crosses the probe), magnitude within wb noise band.
+- line-start longest-no-overlap (control): paired median 0.0 ms, 10/24
+  wins — pure noise, no regression (the always_inline bloat concern from
+  EXP-005 does not materialize; helper body is 3 test-and-branch blocks).
+
+New accepted baseline (post-EXP-006, wall medians, `--threads 8`, quiet,
+256 MiB base corpus):
+- longest-no-overlap: ≈ 485 ms (was ≈ 504 ms)
+- word-boundary longest-no-overlap: ≈ 352 ms (was ≈ 358 ms; within-band)
+- line-start: ≈ 60 ms (unchanged; within noise)
 
 ## Known dead ends
+
+- Bloom-probe layout/ILP variants (EXP-006 microbenchmark evidence,
+  `bloom_micro.c` in scratch): prefetching probe-2's line on the
+  short-circuit path (128-133 vs 114-117 ms baseline), 8-wide batched
+  probe-1 loads (141-160 ms), and software-pipelined next-position
+  probe-1 (~neutral) are all no-better-or-worse than the current serial
+  short-circuit query. The base .olm bloom is 64 KiB at 6% fill — it
+  lives in L1/L2 and the 2nd/3rd probes almost never execute, so
+  blocked/squarized bloom or prefetch schemes have no cache-miss fuel.
+  Don't re-litigate bloom layout without a corpus where the bloom
+  actually spills (e.g. 100k-pattern compile — blocked on the `olm
+  compile` sandbox failure above).
 
 - `perf record`/`perf report` produce no usable output on this host (no
   symbols/kallsyms access); `valgrind`/`hyperfine` not installed; `sudo`
@@ -350,13 +428,15 @@ New accepted baseline (post-EXP-005, wall medians, `--threads 8`, quiet,
    (accepted: default chunk 4096 → 1 MiB, −7 to −10 ms on 256 MiB longest
    quiet, pooled n=48 p=0.003). Intermediate sizes (16K–256K) were within
    noise of 4096 in the probe sweep; no further chunk tuning worth doing.
-4. Bloom-filter probe layout (`omega_match/src/bloom.c` ~lines 30–95,
-   `bloom_filter_add`/`bloom_filter_query`; 3 probes into one bitmap per
-   `omega/details/bloom.h`): consider a blocked/squarized layout to reduce
-   misses per candidate position. Profile via differential timing on a
-   low-match-rate corpus where candidate rejection dominates. The
-   longest-no-overlap 256 MiB case (≈578 ms, ~443 MiB/s output / ~570 MiB/s
-   quiet) is the big remaining target; every byte runs a bloom probe.
+4. ~~Bloom-filter probe layout~~ — investigated as EXP-006 (accepted:
+   inlined the query into matcher.c's TU, −3.4% on the primary case).
+   Layout/prefetch/batching variants are now recorded dead ends (see
+   Known dead ends) — the 64 KiB base-corpus bloom never leaves L1/L2.
+   Remaining probe-side idea: only viable once `olm compile` works to
+   build a corpus whose bloom spills past L2 (100k patterns).
+   Biggest remaining targets are elsewhere: e.g. the u32 candidate-list
+   append + `core_match` per-position bookkeeping itself, and
+   `pack_gram`/`fast_gram_hash` chain cost at every position.
 5. `--line-end` + `--line-start` combined mode currently produces zero
    matches on the base corpus — verify intent before optimizing it.
 

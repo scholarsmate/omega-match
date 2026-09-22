@@ -50,6 +50,7 @@ static inline void omp_set_schedule(int kind, int chunk_size) {
 
 #include "omega/details/attr.h"
 #include "omega/details/bloom.h"
+#include "omega/details/hash.h"
 #include "omega/details/common.h"
 #include "omega/details/hash_table.h"
 #include "omega/details/match_vector.h"
@@ -1149,6 +1150,33 @@ short_matcher_index4_fast(const short_matcher_t *restrict sm,
   return sm_find_index(sm->arr4, sm->len4, key);
 }
 
+// EXP-006: bloom_filter_query inlined into matcher.c's translation unit.
+// bloom.c is a separate TU (LTO off), so every candidate position in the hot
+// scan loop paid an out-of-line PLT call into bloom_filter_query. This is a
+// byte-for-byte copy of that function's body, marked always_inline; the
+// out-of-line definition in bloom.c stays untouched for other callers.
+static OLM_ALWAYS_INLINE int
+bloom_filter_query_inline(const bloom_filter_t *restrict bf,
+                          const uint32_t key) {
+  const uint32_t h1 = fast_gram_hash(key);
+  const uint32_t mask = bf->bit_size - 1;
+  const uint64_t *restrict bits = bf->bits;
+
+  uint32_t bit_pos = h1 & mask;
+  if ((bits[bit_pos >> 6] & (1ULL << (bit_pos & 63))) == 0) {
+    return 0;
+  }
+
+  const uint32_t h2 = key * 0x9e3779b1U; // GOLDEN_RATIO_32
+  bit_pos = (bit_pos + (h2 & mask)) & mask;
+  if ((bits[bit_pos >> 6] & (1ULL << (bit_pos & 63))) == 0) {
+    return 0;
+  }
+
+  bit_pos = (bit_pos + (h2 & mask)) & mask;
+  return (bits[bit_pos >> 6] & (1ULL << (bit_pos & 63))) != 0;
+}
+
 
 
 // Core case-sensitive matcher with performance optimizations
@@ -1301,7 +1329,7 @@ core_match(const omega_list_matcher_t *restrict matcher,
         if (largest >= 5 && remaining >= 4) {
           ++total_attempts;
           const uint32_t cand = pack_gram(h_ptr);
-          if (unlikely(!bloom_filter_query(bf, cand))) {
+          if (unlikely(!bloom_filter_query_inline(bf, cand))) {
             ++total_filtered;
           } else {
             uint32_t slot_offset;
@@ -1445,9 +1473,10 @@ core_match(const omega_list_matcher_t *restrict matcher,
       if (largest >= 5 && remaining >= 4) {
         ++total_attempts;
         const uint32_t cand = pack_gram(h_ptr);
-        
-        // Use the official bloom filter check which implements 3-hash bloom filter
-        if (unlikely(!bloom_filter_query(bf, cand))) {
+
+        // EXP-006: inlined copy of bloom_filter_query (see definition
+        // above); the out-of-line call cost lands on every scan position.
+        if (unlikely(!bloom_filter_query_inline(bf, cand))) {
           ++total_filtered;
         } else {
           uint32_t slot_offset;
