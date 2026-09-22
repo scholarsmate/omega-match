@@ -134,11 +134,14 @@ python3 scripts/benchmark_scaling.py \
 ```
 
 The checked-in `data/names.txt` contains 29,156 patterns. On an Intel Core
-Ultra 7 165H under Omarchy 4.0.4 (Linux 7.2.5, GCC 16.2), the September 2026
-PGO build produced the following five-run medians over a warm 256 MiB
-KJV-derived corpus on the native Linux filesystem. These are output-equivalent
-CLI measurements: every tool's complete output was consumed, and byte counts
-plus SHA-256 digests were validated in companion correctness runs.
+Ultra 7 165H running Omarchy 4.0.4 directly on bare metal (Linux 7.2.5, GCC
+16.2), the September 2026 PGO build produced the following five-run medians
+over a warm 256 MiB KJV-derived corpus on the native Linux filesystem. These
+are output-equivalent CLI measurements: every tool's complete output was
+consumed, and byte counts plus SHA-256 digests were validated in companion
+correctness runs. This bare-metal snapshot is not directly comparable to the
+earlier WSL2 measurements; differences between them cannot be attributed to
+OmegaMatch changes alone.
 
 | Mode | OM PGO compile + match | OM PGO reused store | GNU grep 3.12-modified | ripgrep 15.2 |
 |---|---:|---:|---:|---:|
