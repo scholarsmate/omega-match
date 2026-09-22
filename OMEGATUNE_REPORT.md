@@ -18,10 +18,11 @@ first, performs exactly ONE bounded experiment, appends the result, and exits.
 
 - Current accepted branch: `perf/omega-tune-2026-09`
 - Current HEAD at campaign start: 407f128 (same as origin/main)
-- Current accepted baseline: EXP-003 (default OMP chunk 4096 -> 1 MiB) —
-  see numbers under EXP-001, EXP-002 and EXP-003 entries below.
+- Current accepted baseline: EXP-004 (word-boundary candidate
+  materialization removed) — see EXP-004 entry under accepted experiments.
 - Session log: EXP-001 accepted (2026-09-21/22), EXP-002 accepted
-  (2026-09-22), EXP-003 accepted (2026-09-22).
+  (2026-09-22), EXP-003 accepted (2026-09-22), EXP-004 accepted
+  (2026-09-22).
 
 ## Environment (fixed for the campaign)
 
@@ -202,6 +203,51 @@ New accepted baseline (post-EXP-003, wall medians, `--threads 8`, quiet):
 - line-start longest-no-overlap 256 MiB: ≈ 51.5 ms quiet (54.0 at chunk 4096)
 - longest-no-overlap 64 MiB: ≈ 124 ms quiet
 
+### EXP-004 — remove word-boundary candidate materialization — ACCEPTED
+
+Hypothesis: `--word-boundary` (without `--line-start`) took a
+"candidate materialization" path in `core_match()` (matcher.c): two SERIAL
+single-threaded byte-at-a-time passes over the haystack (count boundaries,
+then fill a `size_t` array), before the parallel scan even started. On the
+base corpus 104M of 268M positions are word boundaries → an 832 MB
+allocation plus ~800 MB of serial writes, then read back with random-ish
+access. Differential probe: wb 1106 ms vs plain 475 ms quiet — the
+boundary machinery cost ~2.3x the entire plain scan. Meanwhile the
+single-pass loop already contains an identical in-loop word-boundary gate
+(lines ~1337-1343), so the materialization buys nothing except overhead.
+
+Implementation (+12/−1 lines in `omega_match/src/matcher.c`): gate the
+materialization behind `const int use_wb_candidate_path = 0;` so
+`--word-boundary` always uses the single-pass in-loop gate. Code kept in
+place (dead but documented) so the experiment is one-constant revertable.
+
+Correctness:
+- CTest 18/18 pass (`-E python_pytest`).
+- Byte-identical output vs pre-change binary across 4M/64M/256 MiB corpora
+  x 6 flag combos (`--word-boundary`, `--word-boundary --longest
+  --no-overlap`, `--word-boundary --ignore-case`, `--word-boundary
+  --line-start --longest --no-overlap`, controls plain-lno and line-start)
+  plus a punctuation/edge tiny corpus: 16/16 checks OK, exit codes equal,
+  256 MiB wb-longest-no-overlap 2,262,465 lines byte-identical.
+
+Benchmark (interleaved A/B vs pre-change binary, 7 reps, quiet,
+`--threads 8`, 256 MiB base corpus, artifact `exp004-ab.tsv`):
+- word-boundary longest-no-overlap: B 1132-1175 ms -> E 355-377 ms,
+  median 1149 -> 366 ms, −783 ms (−68.1%), 7/7 wins, ranges never overlap.
+- word-boundary plain:              B 1087-1168 ms -> E 346-376 ms,
+  median 1149 -> 366 ms, −783 ms (−68.1%), 7/7 wins.
+- control longest-no-overlap (no wb): B 501-518 vs E 489-516, +2 ms
+  (+0.4%), 4/7 — within noise, path untouched.
+Post-A/B output byte-identity re-checked on the 256 MiB corpus (3 modes).
+
+New accepted baseline (post-EXP-004, wall medians, `--threads 8`, quiet,
+256 MiB base corpus):
+- word-boundary longest-no-overlap: ≈ 366 ms (was ≈ 1149 ms)
+- word-boundary plain: ≈ 366 ms
+- longest-no-overlap: ≈ 505 ms quiet (unchanged; EXP-003 baseline holds;
+  note ambient-load caveat from EXP-003 — compare only within same-session
+  A/B pairs)
+
 ## Rejected / inconclusive experiments
 
 (none yet)
@@ -226,6 +272,15 @@ New accepted baseline (post-EXP-003, wall medians, `--threads 8`, quiet):
 
 ## Recommended next experiments
 
+0. Word-boundary follow-up (from EXP-004): after the fix, wb
+   longest-no-overlap is 366 ms — FASTER than the plain scan (≈471 ms),
+   because the in-loop gate cuts bloom attempts from 268M to 104M. The
+   gate itself is now the hot path for wb: a vectorized (SSE2/AVX2)
+   word-class comparison pass (EXP-002-style skip directly to the next
+   boundary instead of testing every interior byte) could plausibly bring
+   wb toward the line-start profile (~50-80 ms territory). Also the dead
+   `use_wb_candidate_path`-guarded code in matcher.c can be deleted once
+   EXP-004 is considered settled.
 1. ~~Vectorize the line-start newline skip~~ — DONE as EXP-002 (accepted,
    −25 to −33% on line-start). A further step: the EXP-002 skip is SSE2
    (16 B/iter); AVX2 (32 B/iter) would nearly halve iterations on the long

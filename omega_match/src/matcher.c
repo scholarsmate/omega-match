@@ -1154,9 +1154,20 @@ core_match(const omega_list_matcher_t *restrict matcher,
   // input once with an early boundary branch below: materializing every line
   // start could require about eight bytes of offsets per input byte for
   // newline-dense data.
+  //
+  // EXP-004: the same reasoning applies to word boundaries. The materialize
+  // path below ran two SERIAL byte-at-a-time passes (count, then fill) and
+  // stored up to 8 bytes of offsets per input byte; on a typical text corpus
+  // ~40% of positions are boundaries, so it allocated and wrote ~0.3x the
+  // haystack size serially before the parallel scan even started. The
+  // single-pass loop already gates every position with the identical
+  // word-boundary test at negligible cost, so the candidate path is now
+  // disabled for word boundaries as well (kept for line_start==false only
+  // through the flag below; no flag enables it anymore).
+  const int use_wb_candidate_path = 0;
   size_t *candidate_pos = NULL;
   size_t candidate_cnt = 0;
-  if (word_boundary && !line_start) {
+  if (use_wb_candidate_path && word_boundary && !line_start) {
     // First pass: count boundaries
     size_t cnt = 0;
     uint8_t prev_is_word = 0;
