@@ -1430,11 +1430,30 @@ core_match(const omega_list_matcher_t *restrict matcher,
         }
       }
     } else {
-      ptrdiff_t pos;
+      // OpenMP worksharing loop indices cannot be modified in the loop body.
+      // Schedule position-sized chunks explicitly, then let a private cursor
+      // fast-forward within each chunk. schedule(static, 1) on these chunk
+      // descriptors preserves the previous static position distribution.
+      const ptrdiff_t scan_chunk_size =
+          (ptrdiff_t)(matcher->omp_chunk_size > 0
+                          ? matcher->omp_chunk_size
+                          : OMEGA_DEFAULT_OMP_CHUNK);
+      const ptrdiff_t scan_chunk_count =
+          hsize / scan_chunk_size + (hsize % scan_chunk_size != 0);
+      ptrdiff_t chunk_index;
 #ifdef OMEGA_MATCH_USE_OPENMP
-#pragma omp for schedule(runtime)
+#pragma omp for schedule(static, 1)
 #endif
-      for (pos = 0; pos < hsize; ++pos) {
+      for (chunk_index = 0; chunk_index < scan_chunk_count; ++chunk_index) {
+        const ptrdiff_t chunk_begin = chunk_index * scan_chunk_size;
+        const ptrdiff_t chunk_remaining = hsize - chunk_begin;
+        const ptrdiff_t chunk_end =
+            chunk_remaining > scan_chunk_size
+                ? chunk_begin + scan_chunk_size
+                : hsize;
+        ptrdiff_t pos = chunk_begin;
+
+        while (pos < chunk_end) {
         // Match only byte zero and bytes immediately following a line ending.
         // This single parallel pass keeps line-start auxiliary memory constant
         // even when nearly every byte is a newline.  When the current position
@@ -1442,8 +1461,8 @@ core_match(const omega_list_matcher_t *restrict matcher,
         // of re-testing every interior byte.
         if (line_start && pos > 0 && !is_line_end(haystack[pos - 1])) {
           const size_t n =
-              next_line_start_pos(haystack, (size_t)pos, (size_t)hsize);
-          pos = (ptrdiff_t)n - 1; // loop ++pos lands on n (or exits if n==hsize)
+              next_line_start_pos(haystack, (size_t)pos, (size_t)chunk_end);
+          pos = (ptrdiff_t)n;
           continue;
         }
 
@@ -1459,13 +1478,15 @@ core_match(const omega_list_matcher_t *restrict matcher,
           const bool prev_is_word = (pos > 0) ? IS_WORD(haystack[pos - 1]) : false;
           if (curr_is_word == prev_is_word) {
             // SSE2-skip to the next word boundary (EXP-005) instead of
-            // re-testing every interior byte.  pos == 0 is chunk-local:
-            // keep it as a candidate (mirrors the prev_is_word=false test),
-            // so only skip when pos > 0.
+            // re-testing every interior byte. At haystack position zero a
+            // non-word byte correctly fails the boundary test; advance it
+            // directly because the helper requires pos > 0.
             if (pos > 0) {
               const size_t n = next_word_boundary_pos(
-                  haystack, (size_t)pos + 1, (size_t)hsize);
-              pos = (ptrdiff_t)n - 1; // loop ++pos lands on n (or exits)
+                  haystack, (size_t)pos + 1, (size_t)chunk_end);
+              pos = (ptrdiff_t)n;
+            } else {
+              ++pos;
             }
             continue;
           }
@@ -1590,6 +1611,8 @@ core_match(const omega_list_matcher_t *restrict matcher,
             }
           }
         }
+        }
+        ++pos;
         }
       }
     }
